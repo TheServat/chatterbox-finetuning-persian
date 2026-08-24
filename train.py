@@ -121,6 +121,11 @@ def parse_args(argv=None):
         help="reuse the existing preprocess/ cache",
     )
     parser.add_argument(
+        "--resume", action="store_true",
+        help="continue from the newest checkpoint in output_dir - the way to "
+             "survive a Colab disconnect without losing the run",
+    )
+    parser.add_argument(
         "--sample", action="store_true",
         help="synthesise a Persian sample at every checkpoint, so progress can "
              "be heard rather than inferred from the loss curve",
@@ -274,8 +279,19 @@ def main(argv=None) -> int:
         callbacks=callbacks,
     )
 
+    resume = False
+    if args.resume:
+        from transformers.trainer_utils import get_last_checkpoint
+
+        last = get_last_checkpoint(cfg.output_dir) if os.path.isdir(cfg.output_dir) else None
+        if last:
+            logger.info(f"Resuming from {last}")
+            resume = last
+        else:
+            logger.info(f"--resume: no checkpoint in {cfg.output_dir}, starting fresh")
+
     logger.info("Training...")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume or None)
 
     if args.max_steps:
         peak = (

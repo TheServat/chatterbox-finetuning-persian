@@ -171,7 +171,16 @@ tar -czf preprocess_fa.tar.gz -C MyTTSDataset preprocess
 | محدودیت زمان | ~۱۲ ساعت | ~۲۴ ساعت | ندارد |
 | هزینه | ~۱۰$/ماه | ~۵۰$/ماه | ~۰.۴$/ساعت |
 
-[notebooks/colab_train_persian.ipynb](notebooks/colab_train_persian.ipynb) هر دو مسیر را دارد.
+[notebooks/colab_train_persian.ipynb](notebooks/colab_train_persian.ipynb) هر دو مسیر را دارد و
+روی این فرض ساخته شده که **جلسه‌ی Colab قطع می‌شود**:
+
+- ورود با `huggingface_hub.login()` — توکن در فایل نوت‌بوک ذخیره نمی‌شود
+- `pretrained_models/` و `chatterbox_output/` به Google Drive لینک می‌شوند، پس وزن‌ها
+  یک‌بار دانلود می‌شوند و checkpointها همان لحظه‌ی ذخیره روی Drive می‌نشینند
+- کش داده روی Drive **آرشیو** می‌ماند ولی **محلی باز می‌شود**: خواندن ۶۸ هزار فایل کوچک
+  از Drive، DataLoader را خفه می‌کند
+- `python train.py --resume` از آخرین checkpoint ادامه می‌دهد، پس یک قطعی حداکثر
+  به اندازه‌ی `--save-steps` کار را عقب می‌اندازد
 
 ---
 
