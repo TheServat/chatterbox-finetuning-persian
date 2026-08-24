@@ -45,7 +45,6 @@ _LETTER_FOLD = {
     "ك": "ک",  # ARABIC KAF        -> KEHEH
     "ڪ": "ک",  # SWASH KAF         -> KEHEH
     "ة": "ه",  # TEH MARBUTA       -> HEH
-    "ۀ": "ه",  # HEH WITH YEH ABOVE-> HEH
     "أ": "ا",  # ALEF WITH HAMZA ABOVE
     "إ": "ا",  # ALEF WITH HAMZA BELOW
     "ٱ": "ا",  # ALEF WASLA
@@ -61,7 +60,24 @@ _LETTER_FOLD_TABLE = str.maketrans(_LETTER_FOLD)
 
 # Harakat / tashkeel. Datasets diacritise inconsistently, so leaving them in
 # would split one word across several token sequences.
-_HARAKAT = re.compile(r"[ً-ْٰٕٖٟٓٗ٘ـ]")
+# The heh-with-hamza spelling of the ezafe. Folding it to a bare heh would
+# delete the "-ye" a speaker actually pronounces (khane-ye man), so it becomes
+# the equally common ZWNJ+yeh spelling instead. NFKC leaves U+06C0 alone and
+# composes U+06D5+hamza into it, so only these two forms survive NFKC.
+_EZAFE_HEH = re.compile("ۀ|هٔ")
+_EZAFE_REPLACEMENT = "ه" + ZWNJ + "ی"
+
+# Optional short vowels only. Corpora diacritise inconsistently, so keeping
+# these would split one word across several token sequences.
+#
+# Deliberately NOT stripped:
+#   U+064B FATHATAN - not optional in Persian. It carries the whole adverbial
+#                     "-an" ending (lotfan, meslan, taqriban); removing it
+#                     turns lotfan into lotfa.
+#   U+0653 MADDAH   - the madda of A. NFKC normally composes it away, but a
+#                     decomposed input would otherwise become a bare alef.
+#   U+0654 / U+0655 HAMZA ABOVE / BELOW - lexical hamza.
+_HARAKAT = re.compile("[ٌ-ْٖ-ٰٟ٘ـ]")
 
 _PUNCT_MAP = {
     "…": "،",   # ... -> Persian comma
@@ -177,6 +193,7 @@ def normalize(
     # caught here rather than through _PUNCT_MAP.
     text = re.sub(r"\.{2,}", "، ", text)
     text = text.translate(_BIDI_AND_FORMAT)
+    text = _EZAFE_HEH.sub(_EZAFE_REPLACEMENT, text)
     text = text.translate(_LETTER_FOLD_TABLE)
 
     if strip_diacritics:
