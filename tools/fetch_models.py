@@ -31,6 +31,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
 LOCK_PATH = ROOT / "versions.lock.json"
 DEST_DIR = ROOT / "pretrained_models"
 
@@ -121,25 +123,55 @@ def place(source: Path, destination: Path) -> str:
         return "copied"
 
 
-def download(lock: dict, filename: str, destination: Path) -> None:
-    """Fetch one file straight into `pretrained_models/`.
+def salvage_partials(destination: Path) -> None:
+    """Reuse bytes an earlier interrupted attempt already fetched.
 
-    `local_dir` keeps the bytes out of the HuggingFace cache. The cache lives on
-    C: while the project lives on D:, so the default path would land a second
-    2 GB copy on the smaller drive for no benefit.
+    `huggingface_hub` leaves its work in `.cache/huggingface/download/*.incomplete`.
+    Those are the same bytes from the same offset, so a 1 GB partial is worth
+    carrying over rather than re-downloading.
     """
-    from huggingface_hub import hf_hub_download
+    partial = destination.with_suffix(destination.suffix + ".part")
+    if partial.exists():
+        return
 
-    path = hf_hub_download(
-        repo_id=lock["weights"]["repo_id"],
-        filename=filename,
-        revision=lock["weights"]["revision"],
-        token=os.environ.get("HF_TOKEN") or None,
-        local_dir=str(destination.parent),
+    cache = destination.parent / ".cache" / "huggingface" / "download"
+    if not cache.is_dir():
+        return
+
+    candidates = [
+        p for p in cache.glob("*.incomplete") if p.stat().st_size > 0
+    ]
+    if len(candidates) != 1:
+        # Two partials and no way to tell which file each belongs to; starting
+        # clean is safer than splicing the wrong bytes onto a checkpoint.
+        return
+
+    source = candidates[0]
+    print(f"    resuming from a previous attempt ({human(source.stat().st_size)})")
+    shutil.move(str(source), str(partial))
+
+
+def download(lock: dict, filename: str, destination: Path) -> None:
+    """Fetch one file straight into `pretrained_models/`, resuming if possible.
+
+    Deliberately not `hf_hub_download`: it has no read timeout, so a connection
+    that goes quiet without closing blocks forever. That happened repeatedly on
+    this link at the 1 GB mark. `tools/download.py` times out, resumes with a
+    Range request, and verifies the final size.
+    """
+    from tools.download import download as resumable_download, hf_url
+
+    salvage_partials(destination)
+
+    url = hf_url(
+        lock["weights"]["repo_id"], filename, lock["weights"]["revision"]
     )
-    downloaded = Path(path)
-    if downloaded.resolve() != destination.resolve():
-        place(downloaded, destination)
+    resumable_download(
+        url,
+        destination,
+        expected_size=lock["weights"]["files"].get(filename, {}).get("size"),
+        token=os.environ.get("HF_TOKEN") or None,
+    )
 
 
 def human(num_bytes: int | None) -> str:

@@ -42,7 +42,7 @@ class ChatterboxDataset(Dataset):
             
             pt_path = os.path.join(self.preprocessed_dir, filename)
             
-            data = torch.load(pt_path)
+            data = torch.load(pt_path, weights_only=True)
             
             
             text_tokens = data["text_tokens"]
@@ -60,7 +60,10 @@ class ChatterboxDataset(Dataset):
             speaker_emb = data["speaker_emb"]
             prompt_tokens = data["prompt_tokens"]
 
-            if random.random() < 0.20:
+            # Voice-conditioning dropout. Without it the model learns to copy
+            # the reference clip instead of reading the text, and cannot speak
+            # at all when no prompt is supplied.
+            if random.random() < getattr(self.cfg, "cond_dropout", 0.20):
                 speaker_emb = torch.zeros_like(speaker_emb)
                 prompt_tokens = torch.zeros(1, dtype=torch.long)
 

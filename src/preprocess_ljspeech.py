@@ -8,6 +8,7 @@ from src.chatterbox_.tts_turbo import ChatterboxTurboTTS
 from src.chatterbox_.models.s3tokenizer import S3_SR
 from src.utils import setup_logger
 from src.config import TrainConfig
+from src.persian.normalize import normalize as normalize_fa
 
 
 logger = setup_logger(__name__)
@@ -82,10 +83,24 @@ def preprocess_dataset_ljspeech(config, tts_engine: ChatterboxTTS):
 
 
             raw_text = str(row[2]) if len(row) > 2 else str(row[1])
-            
-            clean_text = punc_norm(raw_text)
 
-            if config.is_turbo:
+            if config.is_persian:
+                # punc_norm is English-centric: it upper-cases the first letter
+                # (meaningless in Persian) and only recognises Latin sentence
+                # enders. The Persian normaliser is applied instead, and the
+                # tokenizer applies it again at inference so both sides match.
+                clean_text = normalize_fa(raw_text)
+            else:
+                clean_text = punc_norm(raw_text)
+
+            if config.is_persian:
+                # The multilingual tokenizer needs the language tag; without it
+                # the model gets no signal about which language to speak.
+                text_tokens = tts_engine.tokenizer.text_to_tokens(
+                    clean_text, language_id=config.language_id
+                ).squeeze(0).cpu()
+
+            elif config.is_turbo:
                 token_output = tts_engine.tokenizer(clean_text, return_tensors="pt")
                 raw_text_tokens = token_output.input_ids[0].cpu()
                 
@@ -121,13 +136,10 @@ def preprocess_dataset_ljspeech(config, tts_engine: ChatterboxTTS):
 if __name__ == "__main__":
 
     cfg = TrainConfig()
-    
-    if cfg.is_turbo:
-        EngineClass = ChatterboxTurboTTS
-    else:
-        EngineClass = ChatterboxTTS
-    
-    logger.info(f"{EngineClass} engine starting...")
-    tts_engine = EngineClass.from_local(cfg.model_dir, device="cpu")
-    
+
+    from src.engine import build_engine
+
+    logger.info(f"Preprocessing with: {cfg.describe()}")
+    tts_engine = build_engine(cfg, device="cpu")
+
     preprocess_dataset_ljspeech(cfg, tts_engine)

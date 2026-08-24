@@ -1,210 +1,225 @@
+"""Finetune Chatterbox's T3 for Persian.
+
+Only T3 - the model that turns text into S3 speech tokens - is trained. The
+S3Gen decoder and the voice encoder are frozen, which is right for adding a
+language: S3Gen turns speech tokens into a waveform and knows nothing about
+which language produced them.
+
+The Persian path starts from the multilingual checkpoint rather than the
+English one. The English base has 704 text tokens and has never seen Arabic
+script; the multilingual base already carries all 2454 grapheme tokens and real
+Arabic and Hebrew training behind them, so Persian starts from something close
+instead of from noise. `src/engine.py` builds it, grows the text embedding by
+one row for `[fa]`, and seeds that row from `[ar]`.
+
+    python tools/fetch_models.py      # collect the weights
+    python tools/build_dataset.py     # build MyTTSDataset/
+    python train.py
+"""
+
 import os
 import sys
+
 import torch
 from transformers import Trainer, TrainingArguments
-from safetensors.torch import save_file
 
+from src import compat  # noqa: F401  (adds T3's training hooks)
 from src.config import TrainConfig
-from src.dataset import ChatterboxDataset, data_collator_turbo, data_collator_standart
-from src.model import resize_and_load_t3_weights, ChatterboxTrainerWrapper
-from src.preprocess_ljspeech import preprocess_dataset_ljspeech
+from src.dataset import (
+    ChatterboxDataset,
+    data_collator_standart,
+    data_collator_turbo,
+)
+from src.engine import build_engine
+from src.inference_callback import InferenceCallback
+from src.model import ChatterboxTrainerWrapper
 from src.preprocess_file_based import preprocess_dataset_file_based
 from src.preprocess_json import preprocess_dataset_json_based
-from src.utils import setup_logger, check_pretrained_models
-from src.inference_callback import InferenceCallback
+from src.preprocess_ljspeech import preprocess_dataset_ljspeech
+from src.utils import setup_logger
 
-from src.chatterbox_.tts import ChatterboxTTS
-from src.chatterbox_.tts_turbo import ChatterboxTurboTTS
-from src.chatterbox_.models.t3.t3 import T3
-
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 logger = setup_logger("ChatterboxFinetune")
 
 
-def main():
+def check_inputs(cfg: TrainConfig) -> bool:
+    """Fail before loading 3 GB of weights, not after."""
+    problems = []
 
-    cfg = TrainConfig()
+    model_dir = cfg.path(cfg.model_dir)
+    for filename in (
+        cfg.t3_filename, cfg.s3gen_filename, cfg.ve_filename, cfg.tokenizer_filename
+    ) if cfg.is_persian else ():
+        if not (model_dir / filename).exists():
+            problems.append(f"missing {model_dir / filename}")
 
-    logger.info("--- Starting Chatterbox Finetuning ---")
-    logger.info(f"Mode: {'CHATTERBOX-TURBO' if cfg.is_turbo else 'CHATTERBOX-TTS'}")
-    logger.info(f"Training Strategy: {'LoRA' if cfg.is_lora else 'Full Fine-Tune'}")
-
-    # 0. CHECK MODEL FILES
-    mode_check = "chatterbox_turbo" if cfg.is_turbo else "chatterbox"
-    if not check_pretrained_models(mode=mode_check):
-        sys.exit(1)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # 1. SELECT THE CORRECT ENGINE CLASS
-    if cfg.is_turbo:
-        EngineClass = ChatterboxTurboTTS
-    else:
-        EngineClass = ChatterboxTTS
-
-    logger.info(f"Device: {device}")
-    logger.info(f"Model Directory: {cfg.model_dir}")
-
-    # 2. LOAD ORIGINAL MODEL TEMPORARILY
-    logger.info("Loading original model to extract weights...")
-    # Loading on CPU first to save VRAM
-    tts_engine_original = EngineClass.from_local(cfg.model_dir, device="cpu")
-
-    pretrained_t3_state_dict = tts_engine_original.t3.state_dict()
-    original_t3_config = tts_engine_original.t3.hp
-
-    # 3. CREATE NEW T3 MODEL WITH NEW VOCAB SIZE
-    logger.info(f"Creating new T3 model with vocab size: {cfg.new_vocab_size}")
-
-    new_t3_config = original_t3_config
-    new_t3_config.text_tokens_dict_size = cfg.new_vocab_size
-
-    # Prevent caching during training
-    if hasattr(new_t3_config, "use_cache"):
-        new_t3_config.use_cache = False
-    else:
-        setattr(new_t3_config, "use_cache", False)
-
-    new_t3_model = T3(hp=new_t3_config)
-
-    # 4. TRANSFER WEIGHTS
-    logger.info("Transferring weights...")
-    new_t3_model = resize_and_load_t3_weights(new_t3_model, pretrained_t3_state_dict)
-
-    if cfg.is_turbo:
-        logger.info("Turbo Mode: Removing backbone WTE layer...")
-        if hasattr(new_t3_model.tfmr, "wte"):
-            del new_t3_model.tfmr.wte
-
-    # Clean up memory
-    del tts_engine_original
-    del pretrained_t3_state_dict
-
-    # 5. PREPARE ENGINE FOR TRAINING
-    tts_engine_new = EngineClass.from_local(cfg.model_dir, device="cpu")
-    tts_engine_new.t3 = new_t3_model
-
-    logger.info("Freezing S3Gen and VoiceEncoder...")
-    for param in tts_engine_new.ve.parameters():
-        param.requires_grad = False
-
-    for param in tts_engine_new.s3gen.parameters():
-        param.requires_grad = False
-
-    # 6. APPLY LORA OR FULL FINE-TUNE
-    if cfg.is_lora:
-        # --- LoRA PATH ---
-        logger.info("Applying LoRA configuration...")
-
-        for param in tts_engine_new.t3.parameters():
-            param.requires_grad = False
-            
-        from peft import LoraConfig, get_peft_model
-
-        logger.info(f"LoRA Target Modules: {cfg.lora_target_modules}")
-        logger.info(f"Modules to Full Train (Embeddings): {cfg.lora_modules_to_save}")
-
-        peft_config = LoraConfig(
-            r=cfg.lora_r,
-            lora_alpha=cfg.lora_alpha,
-            target_modules=cfg.turbo_lora_target_modules if cfg.is_turbo else cfg.lora_target_modules,
-            lora_dropout=0.05,
-            bias="none",
-            modules_to_save=cfg.lora_modules_to_save,
+    if cfg.preprocess and not cfg.path(cfg.csv_path).exists():
+        problems.append(
+            f"missing {cfg.csv_path} - build it with `python tools/build_dataset.py`"
         )
 
-        tts_engine_new.t3 = get_peft_model(tts_engine_new.t3, peft_config)
-        tts_engine_new.t3.print_trainable_parameters()
-        
+    if problems:
+        logger.error("Cannot start:")
+        for problem in problems:
+            logger.error(f"  - {problem}")
+        logger.error("Run `python tools/fetch_models.py` to collect the weights.")
+        return False
+    return True
 
+
+def apply_lora(cfg: TrainConfig, t3):
+    """Wrap T3 in LoRA, keeping the text embedding and head fully trainable.
+
+    Those two are not adapters-and-freeze material: `[fa]` is a brand-new row,
+    and every Persian character row has so far only ever been trained to sound
+    Arabic. A low-rank update on top of them would not be enough.
+    """
+    from peft import LoraConfig, get_peft_model
+
+    for param in t3.parameters():
+        param.requires_grad = False
+
+    targets = (
+        cfg.turbo_lora_target_modules if cfg.is_turbo else cfg.lora_target_modules
+    )
+    logger.info(f"LoRA targets: {targets}")
+    logger.info(f"Fully trained: {cfg.lora_modules_to_save}")
+
+    peft_config = LoraConfig(
+        r=cfg.lora_r,
+        lora_alpha=cfg.lora_alpha,
+        target_modules=targets,
+        lora_dropout=cfg.lora_dropout,
+        bias="none",
+        modules_to_save=cfg.lora_modules_to_save,
+    )
+    model = get_peft_model(t3, peft_config)
+    model.print_trainable_parameters()
+    return model
+
+
+def main() -> int:
+    cfg = TrainConfig()
+
+    logger.info("--- Chatterbox finetuning ---")
+    logger.info(cfg.describe())
+
+    if not check_inputs(cfg):
+        return 1
+
+    if cfg.precision == "fp16":
+        logger.warning(
+            "This GPU has no native bf16 (pre-Ampere), so training runs in fp16. "
+            "It works, but bf16 is more forgiving of loss spikes - prefer an "
+            "Ampere or newer card for the full run."
+        )
+
+    torch.manual_seed(cfg.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Device: {device}")
+
+    # Built on CPU: the engine loads ~3 GB and preprocessing wants the VRAM.
+    engine = build_engine(cfg, device="cpu")
+
+    logger.info("Freezing S3Gen and the voice encoder")
+    for module in (engine.ve, engine.s3gen):
+        for param in module.parameters():
+            param.requires_grad = False
+
+    if cfg.preprocess:
+        logger.info("Preprocessing...")
+        if cfg.ljspeech:
+            preprocess_dataset_ljspeech(cfg, engine)
+        elif cfg.json_format:
+            preprocess_dataset_json_based(cfg, engine)
+        else:
+            preprocess_dataset_file_based(cfg, engine)
+        # Preprocessing put S3Gen and the voice encoder on the GPU; T3 needs
+        # that memory now and neither is used again during training.
+        engine.ve.to("cpu")
+        engine.s3gen.to("cpu")
+        torch.cuda.empty_cache()
     else:
-        # --- FULL FINE-TUNE PATH ---
-        logger.info("Full fine-tune: enabling all T3 parameters...")
-        tts_engine_new.t3.train()
-        for param in tts_engine_new.t3.parameters():
+        logger.info("Skipping preprocessing (cfg.preprocess is False)")
+
+    if cfg.is_lora:
+        engine.t3 = apply_lora(cfg, engine.t3)
+    else:
+        logger.info("Full finetune: every T3 parameter is trainable")
+        engine.t3.train()
+        for param in engine.t3.parameters():
             param.requires_grad = True
 
-    # 7. PREPROCESSING
-    if cfg.preprocess:
-        logger.info("Initializing Preprocess dataset...")
+    train_dataset = ChatterboxDataset(cfg)
+    model = ChatterboxTrainerWrapper(engine.t3)
 
-        if cfg.ljspeech:
-            preprocess_dataset_ljspeech(cfg, tts_engine_new)
-        elif cfg.json_format:
-            preprocess_dataset_json_based(cfg, tts_engine_new)
-        else:
-            preprocess_dataset_file_based(cfg, tts_engine_new)
-    else:
-        logger.info("Skipping the preprocessing dataset step...")
+    collator = data_collator_turbo if cfg.is_turbo else data_collator_standart
+    logger.info(f"Collator: {'turbo' if cfg.is_turbo else 'standard'}")
 
-    # 8. DATASET & WRAPPER
-    logger.info("Initializing Dataset...")
-    train_ds = ChatterboxDataset(cfg)
+    callbacks = [InferenceCallback(cfg)] if cfg.is_inference else []
 
-    trainer_callbacks = []
-    if cfg.is_inference:
-        inference_cb = InferenceCallback(cfg)
-        trainer_callbacks.append(inference_cb)
-
-    model_wrapper = ChatterboxTrainerWrapper(tts_engine_new.t3)
-
-    if cfg.is_turbo:
-        logger.info("Using Turbo Data Collator (with dynamic prompt masking)")
-        selected_collator = data_collator_turbo
-    else:
-        logger.info("Using Standard Data Collator")
-        selected_collator = data_collator_standart
-
-    # 9. TRAINING ARGUMENTS
     training_args = TrainingArguments(
         output_dir=cfg.output_dir,
         per_device_train_batch_size=cfg.batch_size,
         gradient_accumulation_steps=cfg.grad_accum,
         learning_rate=cfg.learning_rate,
         num_train_epochs=cfg.num_epochs,
+        warmup_ratio=cfg.warmup_ratio,
+        lr_scheduler_type=cfg.lr_scheduler_type,
+        max_grad_norm=cfg.max_grad_norm,
         save_strategy="steps",
         save_steps=cfg.save_steps,
-        logging_strategy="epoch",
-        remove_unused_columns=False,  # Required for our custom wrapper
-        dataloader_num_workers=cfg.dataloader_num_workers,
-        report_to=["tensorboard"],
-        fp16=False,
-        bf16=True,
         save_total_limit=cfg.save_total_limit,
-        gradient_checkpointing=True,  # Reduces VRAM usage by ~60%
-        dataloader_persistent_workers=True,
+        logging_strategy="steps",
+        logging_steps=cfg.logging_steps,
+        remove_unused_columns=False,   # the wrapper takes its own field names
+        dataloader_num_workers=cfg.dataloader_num_workers,
+        dataloader_persistent_workers=cfg.dataloader_num_workers > 0,
         dataloader_pin_memory=True,
+        report_to=["tensorboard"],
+        bf16=cfg.use_bf16,
+        fp16=cfg.use_fp16,
+        gradient_checkpointing=cfg.gradient_checkpointing,
+        seed=cfg.seed,
     )
 
     trainer = Trainer(
-        model=model_wrapper,
+        model=model,
         args=training_args,
-        train_dataset=train_ds,
-        data_collator=selected_collator,
-        callbacks=trainer_callbacks,
+        train_dataset=train_dataset,
+        data_collator=collator,
+        callbacks=callbacks,
     )
 
-    logger.info("Starting Training Loop...")
+    logger.info("Training...")
     trainer.train()
 
-    # 10. SAVE FINAL MODEL
-    logger.info("Training complete. Saving model...")
+    logger.info("Saving...")
     os.makedirs(cfg.output_dir, exist_ok=True)
 
     if cfg.is_lora:
-        # Save LoRA adapter + resized embeddings via PEFT
-        save_path = os.path.join(cfg.output_dir, "new_lang_adapter")
-        tts_engine_new.t3.save_pretrained(save_path)
-        logger.info(f"LoRA adapter saved to: {save_path}")
-        logger.info("NOTE: This adapter contains both LoRA weights AND the new resized embeddings.")
+        save_path = os.path.join(cfg.output_dir, "persian_adapter")
+        engine.t3.save_pretrained(save_path)
+        logger.info(f"Adapter saved to {save_path}")
+        logger.info(
+            "It holds the LoRA weights and the resized text embedding, and is "
+            f"tied to {cfg.t3_filename} - it will not load onto another base."
+        )
     else:
-        # Save full model weights as safetensors
-        filename = "t3_turbo_finetuned.safetensors" if cfg.is_turbo else "t3_finetuned.safetensors"
-        final_model_path = os.path.join(cfg.output_dir, filename)
-        save_file(tts_engine_new.t3.state_dict(), final_model_path)
-        logger.info(f"Full model saved to: {final_model_path}")
+        from safetensors.torch import save_file
+
+        filename = (
+            "t3_turbo_finetuned.safetensors"
+            if cfg.is_turbo
+            else "t3_fa_finetuned.safetensors"
+        )
+        path = os.path.join(cfg.output_dir, filename)
+        save_file(engine.t3.state_dict(), path)
+        logger.info(f"Full model saved to {path}")
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
