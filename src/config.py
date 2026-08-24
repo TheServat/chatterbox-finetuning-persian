@@ -120,7 +120,12 @@ class TrainConfig:
     # --- Constraints ---
     start_text_token: int = 255
     stop_text_token: int = 0
-    max_text_len: int = 256
+    # Measured across the built corpus: ManaTTS peaks at 176 text tokens and
+    # narration at 146, but YodaLingua reaches 282 and ~1.9% of its clips pass
+    # 254. Truncating those would pair full audio with clipped text and teach
+    # the model to speak words that are not in its input. T3 allows 2048, so
+    # the headroom is free.
+    max_text_len: int = 320
     max_speech_len: int = 850    # ~34 s at the 25 Hz speech-token rate
     prompt_duration: float = 3.0
 

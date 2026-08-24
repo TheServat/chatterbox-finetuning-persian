@@ -30,6 +30,45 @@ class ChatterboxDataset(Dataset):
         self.sot_token = config.start_text_token 
         self.eot_token = config.stop_text_token
 
+        self._warn_about_truncation()
+
+
+    def _warn_about_truncation(self, sample_size: int = 2000):
+        """Report clips whose text or audio would be cut by the length limits.
+
+        Truncation is silent and its damage is indirect: the audio still holds
+        the words that were cut from the text, so the model learns to say
+        things its input never asked for. A random sample is enough to notice.
+        """
+        import random
+
+        sample = random.Random(0).sample(
+            self.files, min(sample_size, len(self.files))
+        )
+        text_over = speech_over = 0
+        for filename in sample:
+            try:
+                data = torch.load(
+                    os.path.join(self.preprocessed_dir, filename), weights_only=True
+                )
+            except Exception:
+                continue
+            if data["text_tokens"].size(0) > self.cfg.max_text_len - 2:
+                text_over += 1
+            if data["speech_tokens"].size(0) > self.cfg.max_speech_len:
+                speech_over += 1
+
+        for count, limit_name, limit in (
+            (text_over, "max_text_len", self.cfg.max_text_len),
+            (speech_over, "max_speech_len", self.cfg.max_speech_len),
+        ):
+            if count:
+                logger.warning(
+                    f"{count}/{len(sample)} sampled clips exceed {limit_name}"
+                    f"={limit} and will be truncated. Raise it in src/config.py, "
+                    f"or rebuild with a tighter filter in tools/build_dataset.py."
+                )
+
 
     def __len__(self):
         return len(self.files)
