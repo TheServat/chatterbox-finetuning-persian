@@ -12,6 +12,7 @@ build/
 develop-eggs/
 dist/
 downloads/
+dataset/
 eggs/
 .eggs/
 lib/
@@ -205,3 +206,21 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# --- Persian finetune project ---
+# Datasets (tens of GB) - never commit
+dataset/
+MyTTSDataset/wavs/
+FileBasedDataset/*.wav
+
+# Pretrained + finetuned weights
+pretrained_models/
+chatterbox_output/
+*.safetensors
+*.ckpt
+*.pt
+!speaker_reference/*.wav
+
+# Preprocessed feature cache
+**/preprocess/
+*.jsonl
