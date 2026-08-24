@@ -1,0 +1,133 @@
+{
+  "_comment": [
+    "Reproducibility lock for the Persian Chatterbox finetune.",
+    "Every training run is pinned to exactly these upstream artifacts.",
+    "Refresh with:  python tools/sync_upstream.py --check   (report only)",
+    "               python tools/sync_upstream.py --update  (bump to latest stable + re-vendor)"
+  ],
+  "chatterbox": {
+    "pypi_package": "chatterbox-tts",
+    "version": "0.1.7",
+    "requires_python": ">=3.10",
+    "vendored_into": "src/chatterbox_",
+    "vendored_from": "sdist",
+    "synced_on": "2026-08-24",
+    "note": "Upstream 0.1.7 still loads t3_mtl23ls_v2. We additionally support v3, which is byte-compatible (292 tensors, identical shapes)."
+  },
+  "weights": {
+    "repo_id": "ResembleAI/chatterbox",
+    "revision": "5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18",
+    "files": {
+      "t3_mtl23ls_v3.safetensors": {
+        "size": 2143989928,
+        "sha256": "5abca8321ede76f8e61f1cc0d19aea6c946b28871017ce8726f8a69203f05953",
+        "role": "t3_multilingual_v3"
+      },
+      "t3_mtl23ls_v2.safetensors": {
+        "size": 2143989752,
+        "sha256": "b1237586127ce98e7800a68e49938eb5092846862aabcb6e17b2fda7889a6c75",
+        "role": "t3_multilingual_v2"
+      },
+      "t3_cfg.safetensors": {
+        "size": 2129653744,
+        "sha256": "914cb1696f47527fe8852ca8f1fe1fa63cb34f76f9c715e84e067b744dd0da81",
+        "role": "t3_english"
+      },
+      "s3gen_v3.safetensors": {
+        "size": 1056381804,
+        "sha256": "4a46190f3dccc2230fbb3488a930bccc925862ee68f2662433dfcfe93ce6c2cb",
+        "role": "s3gen_v3"
+      },
+      "s3gen_v3.pt": {
+        "size": 1056903694,
+        "sha256": "f7abce4b196dae2d08d9296cbebc6521b046079577643b42a19a03499d08721e",
+        "role": "s3gen_v3_pickle"
+      },
+      "s3gen.safetensors": {
+        "size": 1056484620,
+        "sha256": "2b78103c654207393955e4900aac14a12de8ef25f4b09424f1ef91941f161d4e",
+        "role": "s3gen"
+      },
+      "s3gen.pt": {
+        "size": 1057165844,
+        "sha256": "9b9ff07e60b20c136e2b1b3d7563a24604e8d2c4c267888d1ee929dd0151d2a3",
+        "role": "s3gen_pickle"
+      },
+      "ve.safetensors": {
+        "size": 5695784,
+        "sha256": "f0921cab452fa278bc25cd23ffd59d36f816d7dc5181dd1bef9751a7fb61f63c",
+        "role": "voice_encoder"
+      },
+      "ve.pt": {
+        "size": 5698626,
+        "sha256": "4b16d836bc598509860f6fa068165a8bb5e9ac84f05582dfcf278a5a372879f1",
+        "role": "voice_encoder_pickle"
+      },
+      "conds.pt": {
+        "size": 107374,
+        "sha256": "6552d70568833628ba019c6b03459e77fe71ca197d5c560cef9411bee9d87f4e",
+        "role": "builtin_voice"
+      },
+      "grapheme_mtl_merged_expanded_v1.json": {
+        "size": 69989,
+        "sha256": null,
+        "role": "tokenizer_mtl_expanded"
+      },
+      "mtl_tokenizer.json": {
+        "size": 68125,
+        "sha256": null,
+        "role": "tokenizer_mtl"
+      },
+      "tokenizer.json": {
+        "size": 25470,
+        "sha256": null,
+        "role": "tokenizer_en"
+      },
+      "Cangjie5_TC.json": {
+        "size": 1920163,
+        "sha256": null,
+        "role": "zh_cangjie_map"
+      }
+    },
+    "profile": {
+      "_comment": "Files actually required for the Persian finetune. 'latest' = newest artifacts on the pinned revision.",
+      "t3": "t3_mtl23ls_v3.safetensors",
+      "s3gen": "s3gen_v3.pt",
+      "ve": "ve.safetensors",
+      "conds": "conds.pt",
+      "tokenizer": "grapheme_mtl_merged_expanded_v1.json",
+      "extras": [
+        "Cangjie5_TC.json"
+      ]
+    }
+  },
+  "local_weight_search_paths": [
+    "D:/me/ai/tts/models/weights/ResembleAI--chatterbox",
+    "D:/me/ai/tts/models/weights/_cb_s3gen_v3"
+  ],
+  "datasets": {
+    "Thomcles/YodaLingua-Farsi": {
+      "type": "hf_dataset",
+      "local_dir": "dataset/persian/YodaLingua-Farsi",
+      "hours": 72,
+      "clips": 23419,
+      "speakers": 678,
+      "sr": 24000,
+      "license": "cc-by-4.0",
+      "quality_field": "dnsmos",
+      "note": "Primary corpus: clean, multi-speaker, 24 kHz, commercially usable."
+    },
+    "MahtaFetrat/Mana-TTS": {
+      "type": "local_wav",
+      "local_dir": "D:/me/tts-one/dataset/manatts_full",
+      "license": "cc0",
+      "note": "Single clean speaker, ~44.6k usable clips. Stability anchor."
+    },
+    "pymmdrza/PERSIAN_FARSI_NARRATION": {
+      "type": "hf_dataset",
+      "local_dir": "dataset/persian/PERSIAN_FARSI_NARRATION",
+      "license": "unverified",
+      "note": "~3k narration clips, already local."
+    }
+  }
+}
