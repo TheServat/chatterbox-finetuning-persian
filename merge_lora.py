@@ -1,64 +1,102 @@
-import os
-from safetensors.torch import save_file
-from peft import PeftModel
+"""Fold a trained LoRA adapter into a standalone T3 checkpoint.
 
-from src.config import TrainConfig
-from src.model import resize_and_load_t3_weights
-from src.utils import setup_logger
+Useful when the adapter should stop being a separate artifact: for sharing a
+single file, for serving without PEFT installed, or for handing the result to
+code that only knows how to load a state dict. `infer_fa.py` merges on the fly
+anyway, so this is not needed just to listen to the model.
 
-from src.chatterbox_.tts import ChatterboxTTS
-from src.chatterbox_.tts_turbo import ChatterboxTurboTTS
-from src.chatterbox_.models.t3.t3 import T3
+The merged file carries the enlarged vocabulary, so load it with a T3 built at
+`cfg.new_vocab_size`, not at the base 2454.
 
-logger = setup_logger("ChatterboxMerge")
+    python merge_lora.py
+    python merge_lora.py --adapter chatterbox_output/persian_adapter --out t3_fa.safetensors
+"""
 
-def main():
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+from src import compat  # noqa: F401,E402
+from src.config import TrainConfig  # noqa: E402
+from src.utils import setup_logger  # noqa: E402
+
+logger = setup_logger("merge-lora")
+
+
+def main() -> int:
     cfg = TrainConfig()
-    
-    logger.info("--- Starting LoRA Merge Process ---")
-    
-    base_model_dir = cfg.model_dir
-    adapter_dir = os.path.join(cfg.output_dir, "new_lang_adapter")
-    
 
-    output_filename = "t3_turbo_finetuned_merged.safetensors" if cfg.is_turbo else "t3_finetuned_merged.safetensors"
-    output_file = os.path.join(cfg.output_dir, output_filename)
-    
-    if not os.path.exists(adapter_dir):
-        logger.error(f"Adapter directory not found at {adapter_dir}! Please train the model first.")
-        return
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument(
+        "--adapter", type=Path,
+        default=Path(cfg.output_dir) / "persian_adapter",
+        help="adapter directory written by train.py",
+    )
+    parser.add_argument(
+        "--out", type=Path,
+        help="output .safetensors (default: <output_dir>/t3_fa_merged.safetensors)",
+    )
+    args = parser.parse_args()
 
-    logger.info("1. Loading base model configuration...")
-    EngineClass = ChatterboxTurboTTS if cfg.is_turbo else ChatterboxTTS
-    tts_engine_base = EngineClass.from_local(base_model_dir, device="cpu")
-    
-    pretrained_state_dict = tts_engine_base.t3.state_dict()
-    t3_config = tts_engine_base.t3.hp
-    
-    logger.info(f"2. Preparing T3 model with new vocab size: {cfg.new_vocab_size}...")
-    t3_config.text_tokens_dict_size = cfg.new_vocab_size
-    new_t3_model = T3(hp=t3_config)
-    
-    new_t3_model = resize_and_load_t3_weights(new_t3_model, pretrained_state_dict)
-    
-    if cfg.is_turbo and hasattr(new_t3_model.tfmr, "wte"):
-        logger.info("Deleting tfmr.wte to match training architecture...")
-        del new_t3_model.tfmr.wte
+    output = args.out or Path(cfg.output_dir) / "t3_fa_merged.safetensors"
 
-    del tts_engine_base
-    del pretrained_state_dict
+    if not args.adapter.exists():
+        logger.error(f"No adapter at {args.adapter}. Train first.")
+        return 1
 
-    logger.info(f"3. Loading LoRA adapter from {adapter_dir}...")
-    peft_model = PeftModel.from_pretrained(new_t3_model, adapter_dir)
+    from peft import PeftModel
+    from safetensors.torch import save_file
 
+    logger.info(
+        f"Building the base at vocab {cfg.new_vocab_size} from {cfg.t3_filename}"
+    )
+    if cfg.is_persian:
+        from src.persian.engine import load_persian_t3
 
-    logger.info("4. Merging LoRA weights into base model (merge_and_unload)...")
-    merged_model = peft_model.merge_and_unload()
+        t3 = load_persian_t3(
+            cfg.model_dir,
+            cfg.t3_filename,
+            vocab_size=cfg.new_vocab_size,
+            tokenizer_path=Path(cfg.model_dir) / cfg.tokenizer_filename,
+            # Merging touches weights only; the attention kernel is irrelevant
+            # and sdpa builds faster.
+            attn_implementation="sdpa",
+        )
+    else:
+        from src.chatterbox_.models.t3.modules.t3_config import T3Config
+        from src.chatterbox_.models.t3.t3 import T3
+        from safetensors.torch import load_file
 
-    logger.info(f"5. Saving standalone merged model to {output_file}...")
-    save_file(merged_model.state_dict(), output_file)
-    
-    logger.info("--- MERGE COMPLETE ---")
+        from src.model import resize_and_load_t3_weights
+
+        t3 = T3(hp=T3Config(text_tokens_dict_size=cfg.new_vocab_size))
+        t3 = resize_and_load_t3_weights(
+            t3, load_file(str(Path(cfg.model_dir) / cfg.t3_filename))
+        )
+        if cfg.is_turbo and hasattr(t3.tfmr, "wte"):
+            logger.info("Turbo: removing the backbone wte to match training")
+            del t3.tfmr.wte
+
+    logger.info(f"Applying {args.adapter}")
+    merged = PeftModel.from_pretrained(t3, str(args.adapter)).merge_and_unload()
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    state = {k: v.contiguous() for k, v in merged.state_dict().items()}
+    save_file(state, str(output))
+
+    size_gb = output.stat().st_size / 2**30
+    logger.info(f"Wrote {output} ({size_gb:.2f} GB, vocab {cfg.new_vocab_size})")
+    logger.info(
+        "Load it into a T3 built at this vocabulary size - the base 2454 will "
+        "not accept it."
+    )
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -1,18 +1,50 @@
-peft==0.17.1
-torch==2.6.0
-torchaudio==2.6.0
-torchvision==0.21.0
-chatterbox-tts==0.1.2
-silero-vad==6.2.0
-librosa==0.11.0
-soundfile==0.13.1
-num2words
-ffmpeg-python
-tqdm
-pandas
-safetensors
-tensorboard
+# Persian Chatterbox finetuning.
+#
+# The chatterbox source is vendored in src/chatterbox_ (see
+# tools/sync_upstream.py), so the pip package is deliberately NOT installed -
+# only what it depends on. Installing it too would put a second copy of the same
+# modules on the path and make it ambiguous which one runs.
+#
+# Versions match a verified working environment (Python 3.13, CUDA 12.8).
+# transformers 5.2.0 is what chatterbox-tts 0.1.7 itself pins.
+
+# --- core ---
+torch>=2.6.0
+torchaudio>=2.6.0
+transformers==5.2.0
+accelerate>=1.0.0
+peft>=0.17.0
+safetensors>=0.5.0
+tokenizers>=0.21.0
+huggingface_hub>=0.30.0
+
+# --- chatterbox model dependencies ---
+diffusers==0.29.0
+conformer==0.3.2
+s3tokenizer
+resemble-perth>=1.0.0
 omegaconf
-hf_transfer
 pyloudnorm
-gdown
+einops
+
+# --- audio ---
+# soundfile does all file IO: from torchaudio 2.9 `torchaudio.load` needs
+# TorchCodec, which soundfile avoids entirely (see src/utils.py:load_audio).
+soundfile>=0.13.0
+librosa==0.11.0
+
+# --- Persian text ---
+# num2words supplies the Persian number reading used by src/persian/normalize.py.
+num2words>=0.5.13
+
+# --- data + training ---
+numpy
+pandas
+pyarrow          # reads the parquet corpora without expanding them to disk
+tqdm
+tensorboard
+
+# Optional, only for the non-Persian paths kept from upstream:
+#   silero-vad      trim_silence_with_vad in src/utils.py
+#   ffmpeg-python   file-based preprocessing
+#   gdown           dataset downloads from Google Drive

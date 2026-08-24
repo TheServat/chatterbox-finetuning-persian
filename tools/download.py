@@ -109,7 +109,10 @@ def download(
                             print(
                                 f"\r    {human(offset)}{share}  "
                                 f"{human(rate)}/s{eta}   ",
-                                end="",
+                                # A bare carriage return redraws one line in a
+                                # terminal but concatenates into an unreadable
+                                # single line in a log file.
+                                end="" if sys.stdout.isatty() else "\n",
                                 flush=True,
                             )
 
