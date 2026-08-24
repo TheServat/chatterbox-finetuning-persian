@@ -107,7 +107,7 @@
   ],
   "datasets": {
     "Thomcles/YodaLingua-Farsi": {
-      "type": "hf_dataset",
+      "type": "hf_parquet",
       "local_dir": "dataset/persian/YodaLingua-Farsi",
       "hours": 72,
       "clips": 23419,
@@ -115,19 +115,24 @@
       "sr": 24000,
       "license": "cc-by-4.0",
       "quality_field": "dnsmos",
-      "note": "Primary corpus: clean, multi-speaker, 24 kHz, commercially usable."
+      "note": "Primary corpus: clean, multi-speaker, 24 kHz, commercially usable.",
+      "audio_format": "mp3"
     },
     "MahtaFetrat/Mana-TTS": {
       "type": "local_wav",
-      "local_dir": "D:/me/tts-one/dataset/manatts_full",
+      "local_dir": "dataset/persian/manatts_full",
       "license": "cc0",
-      "note": "Single clean speaker, ~44.6k usable clips. Stability anchor."
+      "note": "Already local: raw.csv (audio_path,text,speaker_id,emotion) + wav/. Single clean speaker, CC0. Stability anchor.",
+      "sr": 44100,
+      "clips": 47705
     },
     "pymmdrza/PERSIAN_FARSI_NARRATION": {
       "type": "hf_dataset",
       "local_dir": "dataset/persian/PERSIAN_FARSI_NARRATION",
       "license": "unverified",
-      "note": "~3k narration clips, already local."
+      "note": "Already local: train_metadata.csv (id|text) + train/audio/*.wav at 22.05 kHz.",
+      "sr": 22050,
+      "clips": 3043
     }
   }
 }

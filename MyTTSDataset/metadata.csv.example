@@ -1,0 +1,16 @@
+# LJSpeech layout expected by src/preprocess_ljspeech.py
+#
+#   MyTTSDataset/metadata.csv   pipe-separated, NO header row
+#   MyTTSDataset/wavs/<id>.wav  one file per row
+#
+# Columns:  id | raw-text | normalized-text
+#
+# The loader reads it with header=None and quoting=QUOTE_NONE, so the text must
+# contain no pipe and no quote handling. Column 3 is what actually reaches the
+# tokenizer; column 2 is kept for inspection.
+#
+# Generate it with:  python tools/build_dataset.py
+#
+# Example rows (the real file has no '#' comments):
+mana_00000|وقتی یک فرد با دوربین دوچشمی|وقتی یک فرد با دوربین دوچشمی.
+narr_FA_BZTRSRBSH_part002|قیمت ۲۵۰۰ تومان است|قیمت دو هزار و پانصد تومان است.

@@ -208,9 +208,12 @@ marimo/_lsp/
 __marimo__/
 
 # --- Persian finetune project ---
-# Datasets (tens of GB) - never commit
+# Datasets (tens of GB) - never commit.
+# The generated corpus lives in MyTTSDataset/ because that is the layout
+# src/preprocess_ljspeech.py expects; only the format example is tracked.
 dataset/
-MyTTSDataset/wavs/
+MyTTSDataset/*
+!MyTTSDataset/metadata.csv.example
 FileBasedDataset/*.wav
 
 # Pretrained + finetuned weights
