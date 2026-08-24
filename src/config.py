@@ -94,8 +94,11 @@ class TrainConfig:
     )
 
     # --- Hyperparameters ---
-    batch_size: int = 4
-    grad_accum: int = 8      # effective batch = batch_size * grad_accum
+    # Measured on a 6 GB Quadro RTX 3000 with LoRA r=32 and fp16: batch 1 peaks
+    # at 2.5 GB, 8 at 3.3 GB, 16 at 4.0 GB. 8 leaves room for the long clips
+    # that a short smoke-test subset does not contain.
+    batch_size: int = 8
+    grad_accum: int = 4      # effective batch = batch_size * grad_accum
     learning_rate: float = 1e-4
     num_epochs: int = 5
     warmup_ratio: float = 0.03

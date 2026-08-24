@@ -113,8 +113,15 @@ def load_persian_t3(
 
 
 def _seed_fa_row(model: T3, tokenizer_path: str | Path) -> None:
-    """Copy the `[ar]` embedding and output row into the `[fa]` slot."""
+    """Copy the `[ar]` embedding and output row into the `[fa]` slot.
+
+    Runs after `resize_and_load_t3_weights`, which mean-initialises new rows and
+    says so in its log. That mean value is overwritten here, so the log line
+    below is the one that describes what `[fa]` actually ends up as.
+    """
     import json
+
+    from src.utils import setup_logger
 
     data = json.loads(Path(tokenizer_path).read_text(encoding="utf-8"))
     vocab = data["model"]["vocab"]
@@ -130,6 +137,11 @@ def _seed_fa_row(model: T3, tokenizer_path: str | Path) -> None:
             weight = module.weight
             if weight.shape[0] > max(fa_id, seed_id):
                 weight[fa_id].copy_(weight[seed_id])
+
+    setup_logger(__name__).info(
+        f"{FA_TOKEN} (id {fa_id}) seeded from {SEED_TOKEN} (id {seed_id}), "
+        "replacing the mean initialisation"
+    )
 
 
 class ChatterboxPersianTTS(ChatterboxMultilingualTTS):
@@ -162,7 +174,7 @@ class ChatterboxPersianTTS(ChatterboxMultilingualTTS):
             if ve_path.suffix == ".safetensors"
             else torch.load(ve_path, weights_only=True)
         )
-        voice_encoder.load_state_dict(ve_state)
+        compat.load_state_dict_tolerant(voice_encoder, ve_state, ve_filename)
         voice_encoder.to(device).eval()
 
         t3 = load_persian_t3(
@@ -181,7 +193,7 @@ class ChatterboxPersianTTS(ChatterboxMultilingualTTS):
             if s3gen_path.suffix == ".safetensors"
             else torch.load(s3gen_path, weights_only=True)
         )
-        s3gen.load_state_dict(s3gen_state)
+        compat.load_state_dict_tolerant(s3gen, s3gen_state, s3gen_filename)
         s3gen.to(device).eval()
 
         tokenizer = PersianMTLTokenizer(str(ckpt_dir / tokenizer_filename))

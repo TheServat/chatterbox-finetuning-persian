@@ -99,16 +99,73 @@ def apply_lora(cfg: TrainConfig, t3):
     return model
 
 
-def main() -> int:
+def parse_args(argv=None):
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument(
+        "--max-steps", type=int,
+        help="stop after N optimiser steps - use a small value to smoke-test "
+             "the whole path (model, LoRA, collator, backward) in a minute",
+    )
+    parser.add_argument("--epochs", type=float, help="override num_epochs")
+    parser.add_argument("--batch-size", type=int, help="override batch_size")
+    parser.add_argument("--grad-accum", type=int, help="override grad_accum")
+    parser.add_argument("--lora-r", type=int, help="override lora_r")
+    parser.add_argument("--lr", type=float, help="override learning_rate")
+    parser.add_argument("--workers", type=int, help="override dataloader workers")
+    parser.add_argument("--output-dir", help="override output_dir")
+    parser.add_argument(
+        "--no-preprocess", action="store_true",
+        help="reuse the existing preprocess/ cache",
+    )
+    parser.add_argument(
+        "--precision", choices=["auto", "bf16", "fp16", "fp32"], default="auto",
+        help="override the detected precision (auto is almost always right)",
+    )
+    return parser.parse_args(argv)
+
+
+def configure(args) -> TrainConfig:
     cfg = TrainConfig()
+
+    for attr, value in (
+        ("num_epochs", args.epochs),
+        ("batch_size", args.batch_size),
+        ("grad_accum", args.grad_accum),
+        ("lora_r", args.lora_r),
+        ("learning_rate", args.lr),
+        ("dataloader_num_workers", args.workers),
+        ("output_dir", args.output_dir),
+    ):
+        if value is not None:
+            setattr(cfg, attr, value)
+
+    if args.no_preprocess:
+        cfg.preprocess = False
+
+    if args.lora_r is not None:
+        # alpha tracks r; changing one without the other silently rescales the
+        # effective learning rate of every adapter.
+        cfg.lora_alpha = args.lora_r * 2
+
+    return cfg
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    cfg = configure(args)
 
     logger.info("--- Chatterbox finetuning ---")
     logger.info(cfg.describe())
+    if args.max_steps:
+        logger.info(f"Smoke test: stopping after {args.max_steps} steps")
 
     if not check_inputs(cfg):
         return 1
 
-    if cfg.precision == "fp16":
+    precision = cfg.precision if args.precision == "auto" else args.precision
+    if precision == "fp16":
         logger.warning(
             "This GPU has no native bf16 (pre-Ampere), so training runs in fp16. "
             "It works, but bf16 is more forgiving of loss spikes - prefer an "
@@ -159,13 +216,25 @@ def main() -> int:
 
     callbacks = [InferenceCallback(cfg)] if cfg.is_inference else []
 
+    # transformers 5.2 deprecated warmup_ratio in favour of warmup_steps, so the
+    # ratio is resolved here against the actual step count.
+    steps_per_epoch = max(
+        1, len(train_dataset) // max(1, cfg.batch_size * cfg.grad_accum)
+    )
+    total_steps = args.max_steps or int(steps_per_epoch * cfg.num_epochs)
+    warmup_steps = max(1, int(total_steps * cfg.warmup_ratio))
+    logger.info(
+        f"{steps_per_epoch} steps/epoch, {total_steps} total, "
+        f"{warmup_steps} warmup"
+    )
+
     training_args = TrainingArguments(
         output_dir=cfg.output_dir,
         per_device_train_batch_size=cfg.batch_size,
         gradient_accumulation_steps=cfg.grad_accum,
         learning_rate=cfg.learning_rate,
         num_train_epochs=cfg.num_epochs,
-        warmup_ratio=cfg.warmup_ratio,
+        warmup_steps=warmup_steps,
         lr_scheduler_type=cfg.lr_scheduler_type,
         max_grad_norm=cfg.max_grad_norm,
         save_strategy="steps",
@@ -178,8 +247,9 @@ def main() -> int:
         dataloader_persistent_workers=cfg.dataloader_num_workers > 0,
         dataloader_pin_memory=True,
         report_to=["tensorboard"],
-        bf16=cfg.use_bf16,
-        fp16=cfg.use_fp16,
+        bf16=precision == "bf16",
+        fp16=precision == "fp16",
+        max_steps=args.max_steps if args.max_steps else -1,
         gradient_checkpointing=cfg.gradient_checkpointing,
         seed=cfg.seed,
     )
@@ -194,6 +264,20 @@ def main() -> int:
 
     logger.info("Training...")
     trainer.train()
+
+    if args.max_steps:
+        peak = (
+            torch.cuda.max_memory_allocated() / 2**30
+            if torch.cuda.is_available()
+            else 0
+        )
+        logger.info(
+            f"Smoke test finished. Peak VRAM {peak:.2f} GB at "
+            f"batch={cfg.batch_size} accum={cfg.grad_accum} "
+            f"lora_r={cfg.lora_r} precision={precision}."
+        )
+        logger.info("Not saving: a few steps produce nothing worth keeping.")
+        return 0
 
     logger.info("Saving...")
     os.makedirs(cfg.output_dir, exist_ok=True)

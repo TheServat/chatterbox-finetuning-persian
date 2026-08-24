@@ -89,11 +89,17 @@ def _build_persian_without_t3(cfg, model_dir: Path, device: str):
         return torch.load(path, weights_only=True)
 
     voice_encoder = VoiceEncoder()
-    voice_encoder.load_state_dict(_load(model_dir / cfg.ve_filename))
+    compat.load_state_dict_tolerant(
+        voice_encoder, _load(model_dir / cfg.ve_filename), cfg.ve_filename
+    )
     voice_encoder.to(device).eval()
 
     s3gen = S3Gen()
-    s3gen.load_state_dict(_load(model_dir / cfg.s3gen_filename))
+    skipped = compat.load_state_dict_tolerant(
+        s3gen, _load(model_dir / cfg.s3gen_filename), cfg.s3gen_filename
+    )
+    if skipped:
+        logger.info(f"  {cfg.s3gen_filename}: recomputed buffers {skipped}")
     s3gen.to(device).eval()
 
     tokenizer = PersianMTLTokenizer(str(model_dir / cfg.tokenizer_filename))

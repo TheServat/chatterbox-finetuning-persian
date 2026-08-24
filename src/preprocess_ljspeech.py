@@ -6,7 +6,7 @@ from tqdm import tqdm
 from src.chatterbox_.tts import ChatterboxTTS, punc_norm
 from src.chatterbox_.tts_turbo import ChatterboxTurboTTS
 from src.chatterbox_.models.s3tokenizer import S3_SR
-from src.utils import setup_logger
+from src.utils import setup_logger, load_audio
 from src.config import TrainConfig
 from src.persian.normalize import normalize as normalize_fa
 
@@ -44,14 +44,9 @@ def preprocess_dataset_ljspeech(config, tts_engine: ChatterboxTTS):
                 continue
 
 
-            wav, sr = torchaudio.load(wav_path)
-            
-            if wav.shape[0] > 1: 
-                wav = wav.mean(dim=0, keepdim=True)
-                
-            if sr != S3_SR:
-                resampler = torchaudio.transforms.Resample(sr, S3_SR)
-                wav = resampler(wav)
+            # load_audio downmixes and resamples; see src/utils.py for why it
+            # does not use torchaudio.load.
+            wav, sr = load_audio(wav_path, target_sr=S3_SR)
             
             wav = wav.to(device)
 
@@ -140,6 +135,8 @@ if __name__ == "__main__":
     from src.engine import build_engine
 
     logger.info(f"Preprocessing with: {cfg.describe()}")
-    tts_engine = build_engine(cfg, device="cpu")
+    # Preprocessing reads only the voice encoder, the S3 tokenizer and the text
+    # tokenizer, so T3's 2 GB is left on disk.
+    tts_engine = build_engine(cfg, device="cpu", load_t3=False)
 
     preprocess_dataset_ljspeech(cfg, tts_engine)

@@ -26,6 +26,31 @@ def setup_logger(name: str, level=logging.INFO):
     return logger
 
 
+def load_audio(path, target_sr: int = None):
+    """Read an audio file as mono float32, optionally resampled.
+
+    Deliberately soundfile rather than `torchaudio.load`: from torchaudio 2.9 the
+    built-in decoding backends were removed and `load` delegates to TorchCodec,
+    an extra dependency that needs a matching FFmpeg. soundfile is already
+    required here, ships its own libsndfile, and reads wav, flac, ogg and mp3 -
+    which also lets the corpora keep their original formats.
+
+    Returns (tensor of shape [1, samples], sample_rate).
+    """
+    import soundfile as sf
+
+    audio, sample_rate = sf.read(str(path), dtype="float32", always_2d=True)
+    audio = audio.mean(axis=1)  # to mono
+
+    wav = torch.from_numpy(np.ascontiguousarray(audio)).unsqueeze(0)
+
+    if target_sr is not None and sample_rate != target_sr:
+        wav = torchaudio.functional.resample(wav, sample_rate, target_sr)
+        sample_rate = target_sr
+
+    return wav, sample_rate
+
+
 _VAD_MODEL = None
 _GET_SPEECH_TIMESTAMPS = None
 

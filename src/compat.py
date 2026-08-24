@@ -105,6 +105,35 @@ def _silence_progress_bars() -> list[str]:
     return applied
 
 
+def load_state_dict_tolerant(module, state_dict, what: str = "module"):
+    """Load weights, allowing exactly the keys the module declares ignorable.
+
+    S3Gen declares `ignore_state_dict_missing = ("tokenizer._mel_filters",
+    "tokenizer.window")` - a mel filterbank and a Hann window, both recomputed
+    deterministically in `__init__` - but nothing upstream ever acts on that
+    declaration. It happens to work because `s3gen.pt` contains them;
+    `s3gen_v3.pt` does not (2488 keys against 2490), so a strict load of the v3
+    decoder fails outright.
+
+    Plain `strict=False` would fix that and also swallow a genuinely truncated
+    checkpoint. This honours the declaration and nothing beyond it: any other
+    missing or unexpected key is still an error.
+    """
+    ignorable = set(getattr(module, "ignore_state_dict_missing", ()))
+    result = module.load_state_dict(state_dict, strict=False)
+
+    missing = [k for k in result.missing_keys if k not in ignorable]
+    if missing or result.unexpected_keys:
+        raise RuntimeError(
+            f"{what}: checkpoint does not match the model.\n"
+            f"  missing:    {missing[:8]}{' ...' if len(missing) > 8 else ''}\n"
+            f"  unexpected: {list(result.unexpected_keys)[:8]}"
+            f"{' ...' if len(result.unexpected_keys) > 8 else ''}"
+        )
+
+    return [k for k in result.missing_keys if k in ignorable]
+
+
 def apply(quiet: bool = True, verbose: bool = False) -> list[str]:
     """Apply every patch once. Returns what was applied, for logging."""
     global _APPLIED

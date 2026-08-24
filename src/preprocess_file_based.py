@@ -7,7 +7,7 @@ from tqdm import tqdm
 from src.chatterbox_.tts_turbo import ChatterboxTurboTTS
 from src.chatterbox_.tts import ChatterboxTTS, punc_norm
 from src.chatterbox_.models.s3tokenizer import S3_SR
-from src.utils import setup_logger
+from src.utils import setup_logger, load_audio
 from src.config import TrainConfig
 
 
@@ -66,16 +66,9 @@ def preprocess_dataset_file_based(config, tts_engine: ChatterboxTTS):
                 continue
 
 
-            wav, sr = torchaudio.load(wav_path)
-            
-
-            if wav.shape[0] > 1: 
-                wav = wav.mean(dim=0, keepdim=True)
-            
-
-            if sr != S3_SR:
-                resampler = torchaudio.transforms.Resample(sr, S3_SR)
-                wav = resampler(wav)
+            # load_audio downmixes and resamples; see src/utils.py for why
+            # it does not use torchaudio.load.
+            wav, sr = load_audio(wav_path, target_sr=S3_SR)
             
             wav = wav.to(device)
 
