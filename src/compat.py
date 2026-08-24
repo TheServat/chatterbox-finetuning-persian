@@ -89,6 +89,55 @@ def _patch_voice_encoder_dtype() -> list[str]:
     return ["VoiceEncoder.embeds_from_wavs (float32)"]
 
 
+def _patch_is_multilingual() -> list[str]:
+    """Make `is_multilingual` a lower bound instead of an exact vocabulary size.
+
+    `T3Config.is_multilingual` tests `text_tokens_dict_size == 2454`, and T3
+    only builds its `AlignmentStreamAnalyzer` when that is true. The analyzer is
+    what watches the text-to-speech attention during generation and forces an
+    EOS when decoding stalls or loops - the guard against runaway output on long
+    input.
+
+    Adding `[fa]` takes the vocabulary to 2455, so the equality fails and the
+    guard silently switches off. Nothing errors; generation just loses its
+    safety net. A vocabulary that has *grown* past the multilingual size is
+    still multilingual, so the test becomes `>=`.
+    """
+    from src.chatterbox_.models.t3.modules.t3_config import T3Config
+
+    if getattr(T3Config.is_multilingual, "_lower_bound", False):
+        return []
+
+    def is_multilingual(self) -> bool:
+        return self.text_tokens_dict_size >= 2454
+
+    prop = property(is_multilingual)
+    prop.fget._lower_bound = True
+    T3Config.is_multilingual = prop
+    return ["T3Config.is_multilingual (>= 2454)"]
+
+
+def use_eager_attention(model) -> bool:
+    """Switch a built transformer to eager attention.
+
+    The alignment analyzer reads attention weights out of a forward hook, and
+    `output_attentions=True` is ignored under sdpa - the weights never
+    materialise, so `AlignmentStreamAnalyzer.step` stacks a list of `None`.
+    Llama_520M hardcodes `attn_implementation="sdpa"`, and the implementation is
+    bound when the module is built, so flipping the config afterwards is not
+    enough.
+
+    Eager attention is slower and heavier, so this is for inference only -
+    training never constructs the analyzer.
+    """
+    tfmr = getattr(model, "tfmr", model)
+    setter = getattr(tfmr, "set_attn_implementation", None)
+    if setter is None:
+        return False
+    setter("eager")
+    return getattr(tfmr.config, "_attn_implementation", None) == "eager"
+
+
 def _silence_progress_bars() -> list[str]:
     """Replace the inference-loop tqdm wrappers with a pass-through."""
     import src.chatterbox_.models.s3gen.flow_matching as flow_matching
@@ -140,7 +189,11 @@ def apply(quiet: bool = True, verbose: bool = False) -> list[str]:
     if _APPLIED:
         return []
 
-    applied = _patch_t3_training_hooks() + _patch_voice_encoder_dtype()
+    applied = (
+        _patch_t3_training_hooks()
+        + _patch_voice_encoder_dtype()
+        + _patch_is_multilingual()
+    )
     if quiet:
         applied += _silence_progress_bars()
 

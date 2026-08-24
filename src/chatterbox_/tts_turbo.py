@@ -7,7 +7,7 @@ import librosa
 import torch
 import perth
 import pyloudnorm as ln
-import numpy as np
+
 from safetensors.torch import load_file
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
@@ -172,8 +172,8 @@ class ChatterboxTurboTTS:
         tokenizer = AutoTokenizer.from_pretrained(ckpt_dir)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
-        #if len(tokenizer) != 50276:
-        #    print(f"WARNING: Tokenizer len {len(tokenizer)} != 50276")
+        if len(tokenizer) != 50276:
+            print(f"WARNING: Tokenizer len {len(tokenizer)} != 50276")
 
         conds = None
         builtin_voice = ckpt_dir / "conds.pt"
@@ -194,7 +194,7 @@ class ChatterboxTurboTTS:
 
         local_path = snapshot_download(
             repo_id=REPO_ID,
-            token=os.getenv("HF_TOKEN") or True,
+            token=os.getenv("HF_TOKEN") or None,
             # Optional: Filter to download only what you need
             allow_patterns=["*.safetensors", "*.json", "*.txt", "*.pt", "*.model"]
         )
@@ -217,7 +217,6 @@ class ChatterboxTurboTTS:
     def prepare_conditionals(self, wav_fpath, exaggeration=0.5, norm_loudness=True):
         ## Load and norm reference wav
         s3gen_ref_wav, _sr = librosa.load(wav_fpath, sr=S3GEN_SR)
-        s3gen_ref_wav = s3gen_ref_wav.astype(np.float32)
 
         assert len(s3gen_ref_wav) / _sr > 5.0, "Audio prompt must be longer than 5 seconds!"
 
@@ -225,7 +224,6 @@ class ChatterboxTurboTTS:
             s3gen_ref_wav = self.norm_loudness(s3gen_ref_wav, _sr)
 
         ref_16k_wav = librosa.resample(s3gen_ref_wav, orig_sr=S3GEN_SR, target_sr=S3_SR)
-        ref_16k_wav = ref_16k_wav.astype(np.float32)
 
         s3gen_ref_wav = s3gen_ref_wav[:self.DEC_COND_LEN]
         s3gen_ref_dict = self.s3gen.embed_ref(s3gen_ref_wav, S3GEN_SR, device=self.device)
@@ -237,14 +235,13 @@ class ChatterboxTurboTTS:
             t3_cond_prompt_tokens = torch.atleast_2d(t3_cond_prompt_tokens).to(self.device)
 
         # Voice-encoder speaker embedding
-        ve_embed_numpy = self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=S3_SR)
-        ve_embed = torch.from_numpy(ve_embed_numpy).float()
+        ve_embed = torch.from_numpy(self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=S3_SR))
         ve_embed = ve_embed.mean(axis=0, keepdim=True).to(self.device)
 
         t3_cond = T3Cond(
             speaker_emb=ve_embed,
             cond_prompt_speech_tokens=t3_cond_prompt_tokens,
-            emotion_adv=exaggeration * torch.ones(1, 1, 1).to(self.device)
+            emotion_adv=exaggeration * torch.ones(1, 1, 1),
         ).to(device=self.device)
         self.conds = Conditionals(t3_cond, s3gen_ref_dict)
 

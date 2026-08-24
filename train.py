@@ -177,7 +177,7 @@ def main(argv=None) -> int:
     logger.info(f"Device: {device}")
 
     # Built on CPU: the engine loads ~3 GB and preprocessing wants the VRAM.
-    engine = build_engine(cfg, device="cpu")
+    engine = build_engine(cfg, device="cpu", for_training=True)
 
     logger.info("Freezing S3Gen and the voice encoder")
     for module in (engine.ve, engine.s3gen):

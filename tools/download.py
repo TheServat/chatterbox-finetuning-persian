@@ -94,7 +94,10 @@ def download(
                         offset += len(chunk)
 
                         now = time.monotonic()
-                        if progress and now - last_report >= 2.0:
+                        # A carriage-return progress line is unreadable once it
+                        # lands in a log file, so report far less often there.
+                        interval = 2.0 if sys.stdout.isatty() else 30.0
+                        if progress and now - last_report >= interval:
                             last_report = now
                             rate = offset / max(now - started, 1e-6)
                             share = f"/{human(total)}" if total else ""

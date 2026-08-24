@@ -96,8 +96,29 @@ def cmd_list(datasets: dict) -> int:
     return 0
 
 
+def remote_files(repo_id: str) -> list[tuple[str, int]]:
+    """(path, size) for every file in a dataset repo."""
+    import urllib.request
+
+    url = f"https://huggingface.co/api/datasets/{repo_id}/tree/main?recursive=1"
+    request = urllib.request.Request(url)
+    if token := os.environ.get("HF_TOKEN"):
+        request.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(request, timeout=60) as response:
+        tree = json.loads(response.read().decode("utf-8"))
+    return [
+        (e["path"], (e.get("lfs") or {}).get("size") or e.get("size") or 0)
+        for e in tree
+        if e.get("type") == "file"
+    ]
+
+
 def fetch(repo_id: str, meta: dict, force: bool) -> bool:
-    from huggingface_hub import snapshot_download
+    # Deliberately not snapshot_download: it has no read timeout, so a
+    # connection that goes quiet without closing blocks forever. That happened
+    # here at 14 MB of 1 GB. tools/download.py times out and resumes.
+    sys.path.insert(0, str(ROOT))
+    from tools.download import download, hf_url
 
     raw = meta["local_dir"]
     target = Path(raw) if Path(raw).is_absolute() else ROOT / raw
@@ -109,17 +130,34 @@ def fetch(repo_id: str, meta: dict, force: bool) -> bool:
         print(f"  {repo_id}: marked local_wav but {raw} is missing - skipping")
         return False
 
-    if target.exists() and local_size(target) > 0 and not force:
-        print(f"  {repo_id}: already present ({human(local_size(target))})")
+    token = os.environ.get("HF_TOKEN") or None
+    files = remote_files(repo_id)
+
+    # "The directory is non-empty" is not the same as "the dataset is here": an
+    # interrupted run leaves a README and nothing else, which is exactly what
+    # happened before. Completeness is judged per file, against the remote sizes.
+    missing = [
+        (path, size)
+        for path, size in files
+        if force
+        or not (target / path).exists()
+        or ((target / path).stat().st_size != size and size)
+    ]
+
+    if not missing:
+        print(f"  {repo_id}: complete ({len(files)} files, {human(local_size(target))})")
         return True
 
-    print(f"  {repo_id}: downloading -> {raw}")
-    snapshot_download(
-        repo_id=repo_id,
-        repo_type="dataset",
-        local_dir=str(target),
-        token=os.environ.get("HF_TOKEN") or None,
-    )
+    print(f"  {repo_id}: {len(missing)} of {len(files)} files to fetch -> {raw}")
+    for path, size in missing:
+        print(f"    {path} ({human(size)})")
+        download(
+            hf_url(repo_id, path, repo_type="dataset"),
+            target / path,
+            expected_size=size or None,
+            token=token,
+        )
+
     print(f"    done ({human(local_size(target))})")
     return True
 

@@ -38,8 +38,14 @@ class _T3Stub:
         )
 
 
-def build_engine(cfg, device: str = "cpu", *, load_t3: bool = True):
-    """Construct the engine this config describes, loaded from `cfg.model_dir`."""
+def build_engine(
+    cfg, device: str = "cpu", *, load_t3: bool = True, for_training: bool = False
+):
+    """Construct the engine this config describes, loaded from `cfg.model_dir`.
+
+    `for_training` keeps the faster sdpa attention. Inference uses eager, which
+    is the only way the alignment analyzer can read attention weights.
+    """
     model_dir = Path(cfg.model_dir)
 
     if cfg.is_persian:
@@ -58,6 +64,7 @@ def build_engine(cfg, device: str = "cpu", *, load_t3: bool = True):
                 ve_filename=cfg.ve_filename,
                 tokenizer_filename=cfg.tokenizer_filename,
                 vocab_size=cfg.new_vocab_size,
+                attn_implementation="sdpa" if for_training else "eager",
             )
 
         logger.info("Loading Persian engine without T3 (preprocessing only)")

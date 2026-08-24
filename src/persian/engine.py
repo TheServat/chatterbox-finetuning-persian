@@ -83,6 +83,7 @@ def load_persian_t3(
     vocab_size: int = FA_VOCAB_SIZE,
     tokenizer_path: str | Path | None = None,
     device: str = "cpu",
+    attn_implementation: str = "eager",
 ) -> T3:
     """Build a T3 sized for Persian and load the multilingual base into it.
 
@@ -108,6 +109,12 @@ def load_persian_t3(
 
     if vocab_size > BASE_VOCAB_SIZE:
         _seed_fa_row(model, tokenizer_path or model_dir / "tokenizer_fa.json")
+
+    if attn_implementation == "eager":
+        # Required for the alignment analyzer to see any attention at all.
+        # Training passes "sdpa": it never builds the analyzer, and eager is
+        # slower and uses more memory.
+        compat.use_eager_attention(model)
 
     return model.to(device)
 
@@ -158,6 +165,7 @@ class ChatterboxPersianTTS(ChatterboxMultilingualTTS):
         ve_filename: str = "ve.safetensors",
         tokenizer_filename: str = "tokenizer_fa.json",
         vocab_size: int = FA_VOCAB_SIZE,
+        attn_implementation: str = "eager",
     ) -> "ChatterboxPersianTTS":
         from safetensors.torch import load_file as load_safetensors
 
@@ -183,6 +191,7 @@ class ChatterboxPersianTTS(ChatterboxMultilingualTTS):
             vocab_size=vocab_size,
             tokenizer_path=ckpt_dir / tokenizer_filename,
             device=device,
+            attn_implementation=attn_implementation,
         )
         t3.eval()
 

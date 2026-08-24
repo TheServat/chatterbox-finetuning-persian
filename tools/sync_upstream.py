@@ -272,7 +272,10 @@ def cmd_update(lock: dict, version: str | None, keep_backup: bool) -> int:
         urllib.request.urlretrieve(url, archive)
 
         with tarfile.open(archive) as tar:
-            tar.extractall(tmp_path)
+            # filter="data" rejects absolute paths, symlinks and metadata games
+            # in the archive. It becomes the default in 3.14; setting it here
+            # silences the warning and makes the behaviour explicit.
+            tar.extractall(tmp_path, filter="data")
 
         sources = list(tmp_path.glob("*/src/chatterbox"))
         if not sources:
