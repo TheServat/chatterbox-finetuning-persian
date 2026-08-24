@@ -114,10 +114,16 @@ def parse_args(argv=None):
     parser.add_argument("--lora-r", type=int, help="override lora_r")
     parser.add_argument("--lr", type=float, help="override learning_rate")
     parser.add_argument("--workers", type=int, help="override dataloader workers")
+    parser.add_argument("--save-steps", type=int, help="override save_steps")
     parser.add_argument("--output-dir", help="override output_dir")
     parser.add_argument(
         "--no-preprocess", action="store_true",
         help="reuse the existing preprocess/ cache",
+    )
+    parser.add_argument(
+        "--sample", action="store_true",
+        help="synthesise a Persian sample at every checkpoint, so progress can "
+             "be heard rather than inferred from the loss curve",
     )
     parser.add_argument(
         "--precision", choices=["auto", "bf16", "fp16", "fp32"], default="auto",
@@ -136,6 +142,7 @@ def configure(args) -> TrainConfig:
         ("lora_r", args.lora_r),
         ("learning_rate", args.lr),
         ("dataloader_num_workers", args.workers),
+        ("save_steps", args.save_steps),
         ("output_dir", args.output_dir),
     ):
         if value is not None:
@@ -143,6 +150,9 @@ def configure(args) -> TrainConfig:
 
     if args.no_preprocess:
         cfg.preprocess = False
+
+    if args.sample:
+        cfg.is_inference = True
 
     if args.lora_r is not None:
         # alpha tracks r; changing one without the other silently rescales the
@@ -214,7 +224,9 @@ def main(argv=None) -> int:
     collator = data_collator_turbo if cfg.is_turbo else data_collator_standart
     logger.info(f"Collator: {'turbo' if cfg.is_turbo else 'standard'}")
 
-    callbacks = [InferenceCallback(cfg)] if cfg.is_inference else []
+    # The callback samples from this very engine, so the audio reflects the
+    # weights at that step and no second copy competes for VRAM.
+    callbacks = [InferenceCallback(cfg, engine=engine)] if cfg.is_inference else []
 
     # transformers 5.2 deprecated warmup_ratio in favour of warmup_steps, so the
     # ratio is resolved here against the actual step count.

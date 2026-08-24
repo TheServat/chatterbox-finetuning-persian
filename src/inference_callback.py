@@ -16,9 +16,17 @@ logger = setup_logger("InferenceCallback")
 
 class InferenceCallback(TrainerCallback):
 
-    def __init__(self, config):
+    def __init__(self, config, engine=None):
+        """`engine` lets the Persian path sample from the model being trained.
 
+        The original approach rebuilds a whole second engine per checkpoint and
+        moves it to the GPU, which doubles VRAM - fine on a large card, an
+        immediate OOM on the 6 GB one this was developed against. Passing the
+        live engine also makes the samples honest: they come from the exact
+        weights at that step rather than from a checkpoint reloaded off disk.
+        """
         self.config = config
+        self.engine = engine
         self.inference_dir = os.path.join(config.output_dir, "inference_samples")
         os.makedirs(self.inference_dir, exist_ok=True)
 
@@ -42,6 +50,14 @@ class InferenceCallback(TrainerCallback):
         step = state.global_step
         checkpoint_dir = os.path.join(args.output_dir, f"checkpoint-{step}")
         is_lora = getattr(self.config, "is_lora", False)
+
+        if getattr(self.config, "is_persian", False) and self.engine is not None:
+            output_path = os.path.join(self.inference_dir, f"checkpoint-{step}.wav")
+            try:
+                self._generate_sample_persian(output_path)
+            except Exception as exc:
+                logger.error(f"Persian sample failed at step {step}: {exc}", exc_info=True)
+            return
 
         if is_lora:
             if not os.path.exists(checkpoint_dir):
@@ -94,6 +110,60 @@ class InferenceCallback(TrainerCallback):
                 self._generate_sample_full(weights_path, output_path)
             except Exception as e:
                 logger.error(f"An error occurred during inference (Step: {step}): {e}", exc_info=True)
+
+    # -------------------------------------------------------------------------
+    # Persian: sample from the model currently being trained
+    # -------------------------------------------------------------------------
+    def _generate_sample_persian(self, output_path: str):
+        from src import compat
+
+        engine = self.engine
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        t3 = engine.t3
+        was_training = t3.training
+        # Training keeps sdpa for speed, but the alignment analyzer reads
+        # attention weights that sdpa never produces - and T3 builds that
+        # analyzer for any multilingual vocabulary, so generating under sdpa
+        # would stack a list of None. Switch for the sample, switch back after.
+        previous_attn = getattr(
+            getattr(t3, "tfmr", None), "config", None
+        ) and t3.tfmr.config._attn_implementation
+
+        # S3Gen and the voice encoder live on the CPU during training; they are
+        # ~1 GB and are only needed for these few seconds.
+        try:
+            t3.eval()
+            compat.use_eager_attention(t3)
+            engine.s3gen.to(device).eval()
+            engine.ve.to(device).eval()
+            engine.device = device
+
+            with torch.no_grad():
+                wav = engine.generate(
+                    self.config.inference_test_text,
+                    language_id=self.config.language_id,
+                    audio_prompt_path=self.config.inference_prompt_path,
+                    temperature=0.8,
+                    cfg_weight=0.5,
+                    exaggeration=0.5,
+                    repetition_penalty=1.2,
+                )
+
+            audio = wav.squeeze().cpu().numpy()
+            sf.write(output_path, audio, engine.sr)
+            logger.info(
+                f"Sample saved: {output_path} ({len(audio) / engine.sr:.1f} s)"
+            )
+
+        finally:
+            engine.s3gen.to("cpu")
+            engine.ve.to("cpu")
+            if previous_attn and hasattr(t3.tfmr, "set_attn_implementation"):
+                t3.tfmr.set_attn_implementation(previous_attn)
+            if was_training:
+                t3.train()
+            torch.cuda.empty_cache()
 
     # -------------------------------------------------------------------------
     # LoRA inference

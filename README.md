@@ -1,5 +1,19 @@
 ***
 
+> ## 🇮🇷 Persian / فارسی
+>
+> This fork adds **Persian (Farsi)** support, which upstream Chatterbox does not
+> ship among its 23 languages, plus a mechanism for staying on the latest stable
+> upstream release. See **[README_FA.md](README_FA.md)** for the full guide.
+>
+> Quick differences from the instructions below: the Persian path starts from the
+> **multilingual** checkpoint rather than the English one, adds a `[fa]` language
+> token seeded from `[ar]`, and normalises text through `src/persian/`. Weights
+> come from `python tools/fetch_models.py` (not `setup.py`), the corpus from
+> `python tools/build_dataset.py`, and generation from `infer_fa.py`.
+
+---
+
 # Chatterbox: Fine-Tuning & LoRA Inference Kit 🎙️
 
 A modular, highly efficient infrastructure for **fine-tuning** both **Chatterbox TTS (Standart)** and **Chatterbox Turbo** models with your own dataset and generating high-quality speech synthesis.
