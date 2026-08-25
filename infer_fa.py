@@ -32,7 +32,11 @@ from src import compat  # noqa: F401,E402
 from src.config import TrainConfig  # noqa: E402
 from src.persian.engine import ChatterboxPersianTTS, split_persian  # noqa: E402
 from src.persian.normalize import normalize  # noqa: E402
-from src.utils import setup_logger  # noqa: E402
+from src.utils import (  # noqa: E402
+    normalise_peak,
+    setup_logger,
+    trim_onset_artifact,
+)
 
 logger = setup_logger("infer-fa")
 
@@ -100,6 +104,8 @@ def main() -> int:
     parser.add_argument("--repetition-penalty", type=float, default=1.2)
     parser.add_argument("--seed", type=int, help="fix the sampling seed")
     parser.add_argument("--device", default=None)
+    parser.add_argument("--raw", action="store_true",
+                        help="skip onset trimming and peak normalisation")
 
     args = parser.parse_args()
 
@@ -155,6 +161,16 @@ def main() -> int:
         wav = engine.generate(normalized, language_id=cfg.language_id, **params)
 
     audio = wav.squeeze(0).cpu().numpy()
+
+    if not args.raw:
+        # The decoder emits a short burst of noise before speech starts; it is
+        # brief but it is the first thing a listener hears.
+        before = len(audio)
+        audio = normalise_peak(trim_onset_artifact(audio, engine.sr))
+        if len(audio) < before:
+            logger.info(f"trimmed {1000 * (before - len(audio)) / engine.sr:.0f} ms "
+                        "of decoder onset artefact")
+
     duration = len(audio) / engine.sr
     elapsed = time.monotonic() - started
 

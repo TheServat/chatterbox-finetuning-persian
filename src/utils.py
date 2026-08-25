@@ -51,6 +51,76 @@ def load_audio(path, target_sr: int = None):
     return wav, sample_rate
 
 
+def trim_onset_artifact(
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    max_scan_seconds: float = 0.35,
+    fade_seconds: float = 0.01,
+) -> np.ndarray:
+    """Cut the noise burst the decoder emits before speech actually starts.
+
+    S3Gen's flow matching needs a few frames to settle, and what it emits in the
+    meantime is a short hiss rather than speech - measured on real output as
+    ~80 ms at zero-crossing rates of 0.5-0.8 against 0.14 for the speech that
+    follows. It is brief, but it is the first thing a listener hears, and it
+    reads as a robotic click at the start of every clip.
+
+    This is a property of the decoder, not of an undertrained model, so more
+    training will not remove it.
+
+    Detection uses both energy and zero-crossing rate, because neither alone is
+    enough: the burst is quiet *and* noisy, while a soft speech onset is quiet
+    but not noisy. Only the first `max_scan_seconds` are considered, so a clip
+    that simply begins with a pause is left alone, and a fade-in replaces the
+    click that a hard cut would create.
+    """
+    if audio.size == 0:
+        return audio
+
+    frame = max(1, int(0.01 * sample_rate))
+    usable = audio[: len(audio) // frame * frame]
+    if usable.size < frame * 2:
+        return audio
+
+    frames = usable.reshape(-1, frame)
+    energies = np.sqrt((frames ** 2).mean(axis=1))
+    crossings = (np.diff(np.sign(frames), axis=1) != 0).mean(axis=1)
+
+    speech_level = float(np.percentile(energies, 90))
+    if speech_level <= 0:
+        return audio
+
+    loud_enough = energies > 0.08 * speech_level
+    tonal_enough = crossings < 0.35
+    speech_frames = np.flatnonzero(loud_enough & tonal_enough)
+    if speech_frames.size == 0:
+        return audio
+
+    start_frame = int(speech_frames[0])
+    scan_limit = int(max_scan_seconds * sample_rate / frame)
+    if start_frame == 0 or start_frame > scan_limit:
+        # Speech starts immediately, or the quiet stretch is longer than any
+        # decoder artifact and is therefore real silence worth keeping.
+        return audio
+
+    trimmed = audio[start_frame * frame:]
+
+    fade = min(int(fade_seconds * sample_rate), trimmed.size)
+    if fade > 1:
+        trimmed = trimmed.copy()
+        trimmed[:fade] *= np.linspace(0.0, 1.0, fade, dtype=trimmed.dtype)
+    return trimmed
+
+
+def normalise_peak(audio: np.ndarray, target: float = 0.95) -> np.ndarray:
+    """Scale to a fixed peak, so nothing clips and levels match between clips."""
+    peak = float(np.abs(audio).max()) if audio.size else 0.0
+    if peak <= 0:
+        return audio
+    return audio * (target / peak)
+
+
 _VAD_MODEL = None
 _GET_SPEECH_TIMESTAMPS = None
 

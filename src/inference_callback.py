@@ -8,7 +8,12 @@ from src.chatterbox_.tts import ChatterboxTTS
 from src.chatterbox_.tts_turbo import ChatterboxTurboTTS
 from src.chatterbox_.models.t3.t3 import T3
 from src.model import resize_and_load_t3_weights
-from src.utils import setup_logger, trim_silence_with_vad
+from src.utils import (
+    normalise_peak,
+    setup_logger,
+    trim_onset_artifact,
+    trim_silence_with_vad,
+)
 
 
 logger = setup_logger("InferenceCallback")
@@ -151,6 +156,9 @@ class InferenceCallback(TrainerCallback):
                 )
 
             audio = wav.squeeze().cpu().numpy()
+            # Same treatment the real inference path applies, so a training
+            # sample sounds like what the model will actually produce.
+            audio = normalise_peak(trim_onset_artifact(audio, engine.sr))
             sf.write(output_path, audio, engine.sr)
             logger.info(
                 f"Sample saved: {output_path} ({len(audio) / engine.sr:.1f} s)"

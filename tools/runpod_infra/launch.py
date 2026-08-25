@@ -537,7 +537,29 @@ def main() -> int:
         )
         spec = build_spec(args, control_token, volume, gpu_ids)
         log(f"creating pod ({args.cloud}, sources: {args.sources})")
-        pod_info = api.create_pod(spec)
+        log(f"  GPUs, in order: {', '.join(g.split()[-1] for g in gpu_ids)}")
+        if volume:
+            log(f"  pinned to {volume.get('dataCenterId')} by the network volume")
+
+        try:
+            pod_info = api.create_pod(spec)
+        except api.RunPodError as error:
+            if "no instances currently available" not in str(error):
+                raise
+            # A network volume pins the pod to one datacentre, so "nothing
+            # available" usually means nothing available *there*, not nowhere.
+            log("no instances available for that request")
+            if volume:
+                log(f"  the volume pins this to {volume.get('dataCenterId')}; "
+                    "options:")
+                log("    --no-volume            any datacentre, nothing persisted")
+                log("    --cloud SECURE         same datacentre, roughly double the rate")
+            else:
+                log("  options:")
+                log("    --cloud SECURE         more expensive but usually available")
+                log("    --gpu '<name>'         name a card explicitly")
+            log("  or wait: community capacity comes and goes within minutes")
+            return 1
         pod_id = pod_info["id"]
         _ACTIVE_POD = pod_id
 
