@@ -26,6 +26,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -34,6 +35,9 @@ from urllib.parse import parse_qs, urlparse
 ROOT = Path(os.environ.get("POD_ROOT", "/workspace"))
 TOKEN = os.environ.get("CONTROL_TOKEN", "")
 STARTED = time.time()
+# Refreshed by every authenticated request; the watchdog reads it to decide
+# whether anyone is still watching.
+LAST_POLL = time.time()
 
 LOG_TAIL_BYTES = 8192
 MAX_UPLOAD_BYTES = 8 << 30  # 8 GiB, far above anything this project transfers
@@ -92,6 +96,64 @@ def disk_stats(path: Path) -> dict | None:
         return None
 
 
+def self_terminate(reason: str) -> None:
+    """Delete this pod from inside it. The last defence against a runaway bill."""
+    pod_id = os.environ.get("RUNPOD_POD_ID", "")
+    key = os.environ.get("RUNPOD_API_KEY", "")
+    print(f"self-terminating: {reason}", flush=True)
+
+    if not pod_id or not key:
+        # Nothing else here can stop the billing, so at least make the reason
+        # visible to whoever eventually looks.
+        (ROOT / "FAILED").write_text(
+            f"{reason} (no RUNPOD_POD_ID/RUNPOD_API_KEY, so the pod could not "
+            "delete itself - terminate it by hand)", encoding="utf-8"
+        )
+        return
+
+    import urllib.request
+
+    request = urllib.request.Request(
+        f"https://rest.runpod.io/v1/pods/{pod_id}", method="DELETE"
+    )
+    request.add_header("Authorization", f"Bearer {key}")
+    request.add_header("User-Agent", "chatterbox-pod/1.0")
+    try:
+        urllib.request.urlopen(request, timeout=60)
+    except Exception as error:
+        print(f"self-termination failed: {type(error).__name__}", flush=True)
+
+
+def watchdog() -> None:
+    """Stop paying for a pod nobody is watching.
+
+    The launcher terminates the pod when a run ends, but it can only do that
+    while it is alive. If the machine driving it loses power or its connection,
+    the pod would otherwise keep billing until somebody noticed.
+
+    So the pod watches back: no authenticated poll for `IDLE_LIMIT`, or more
+    than `MAX_LIFETIME` since boot, and it deletes itself. The idle limit is
+    generous on purpose - a home connection dropping for ten minutes should not
+    kill a training run.
+    """
+    idle_limit = float(os.environ.get("IDLE_LIMIT", 3600))
+    max_lifetime = float(os.environ.get("MAX_LIFETIME", 12 * 3600))
+
+    while True:
+        time.sleep(60)
+        idle = time.time() - LAST_POLL
+        alive = time.time() - STARTED
+
+        if alive > max_lifetime:
+            return self_terminate(
+                f"reached the {max_lifetime / 3600:.1f} h lifetime limit"
+            )
+        if idle > idle_limit:
+            return self_terminate(
+                f"no one has checked in for {idle / 60:.0f} min"
+            )
+
+
 def build_status() -> dict:
     phase_file = ROOT / "phase"
     training = read_json(ROOT / "status.json") or {}
@@ -135,13 +197,19 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _authorised(self) -> bool:
+        global LAST_POLL
+
         if not TOKEN:
+            LAST_POLL = time.time()
             return True  # no token configured: refuse to pretend there is one
         header = self.headers.get("Authorization", "")
         prefix = "Bearer "
         if not header.startswith(prefix):
             return False
-        return hmac.compare_digest(header[len(prefix):], TOKEN)
+        if hmac.compare_digest(header[len(prefix):], TOKEN):
+            LAST_POLL = time.time()
+            return True
+        return False
 
     def _send(self, code: int, payload: dict | bytes, content_type="application/json"):
         body = (json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -272,8 +340,12 @@ def main() -> int:
     if not TOKEN:
         print("WARNING: CONTROL_TOKEN is unset - every route is unauthenticated.")
 
+    threading.Thread(target=watchdog, daemon=True).start()
+
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     print(f"control server on :{args.port}, root {ROOT}", flush=True)
+    print(f"watchdog: idle limit {os.environ.get('IDLE_LIMIT', 3600)}s, "
+          f"lifetime limit {os.environ.get('MAX_LIFETIME', 43200)}s", flush=True)
     server.serve_forever()
     return 0
 

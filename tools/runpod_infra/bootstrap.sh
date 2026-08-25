@@ -21,7 +21,13 @@ set -uo pipefail
 WORKSPACE="${POD_ROOT:-/workspace}"
 REPO_DIR="$WORKSPACE/repo"
 PERSIST="${PERSIST_DIR:-$WORKSPACE/persist}"
-CACHE_ARCHIVE="$PERSIST/preprocess_fa.tar.gz"
+# The cache is named after the corpora it was built from. Without this, a cheap
+# yoda-only test would leave a cache that a later full run silently trains on,
+# and the difference would never surface as an error.
+SOURCES="${DATASET_SOURCES:-yoda narration mana_hf}"
+SOURCE_TAG=$(echo "$SOURCES" | tr ' ' '_')
+CACHE_ARCHIVE="$PERSIST/preprocess_${SOURCE_TAG}.tar.gz"
+METADATA_COPY="$PERSIST/metadata_${SOURCE_TAG}.csv"
 MODELS_DIR="$PERSIST/pretrained_models"
 OUTPUT_DIR="$PERSIST/chatterbox_output"
 
@@ -76,14 +82,14 @@ if [ -f "$CACHE_ARCHIVE" ]; then
     # A previous run on this network volume already did the expensive part.
     echo "cache found on the volume: $(du -h "$CACHE_ARCHIVE" | cut -f1)"
     tar -xzf "$CACHE_ARCHIVE" -C "$REPO_DIR/MyTTSDataset" || fail "extracting the cache failed"
-    cp "$PERSIST/metadata.csv" "$REPO_DIR/MyTTSDataset/" 2>/dev/null || true
+    cp "$METADATA_COPY" "$REPO_DIR/MyTTSDataset/metadata.csv" 2>/dev/null || true
 else
     # Built here rather than uploaded. The corpora live on HuggingFace and a
     # datacentre pulls them far faster than a home connection can push 300 MB,
     # and the result is written back to the volume so this happens exactly once.
     phase downloading_datasets
-    step "downloading corpora (${DATASET_SOURCES:-yoda narration mana_hf})"
-    for source in ${DATASET_SOURCES:-yoda narration mana_hf}; do
+    step "downloading corpora ($SOURCES)"
+    for source in $SOURCES; do
         case "$source" in
             yoda)      python3 tools/fetch_datasets.py yoda ;;
             narration) python3 tools/fetch_datasets.py narration ;;
@@ -96,7 +102,7 @@ else
     phase building_dataset
     step "building the corpus"
     # shellcheck disable=SC2086
-    python3 tools/build_dataset.py --sources ${DATASET_SOURCES:-yoda narration mana_hf} \
+    python3 tools/build_dataset.py --sources $SOURCES \
         --dedupe ${BUILD_ARGS:-} || fail "building the dataset failed"
 
     phase preprocessing
@@ -107,12 +113,19 @@ else
     step "saving the cache back to the volume"
     tar -czf "$CACHE_ARCHIVE.part" -C "$REPO_DIR/MyTTSDataset" preprocess \
         && mv "$CACHE_ARCHIVE.part" "$CACHE_ARCHIVE" \
-        && cp "$REPO_DIR/MyTTSDataset/metadata.csv" "$PERSIST/" \
+        && cp "$REPO_DIR/MyTTSDataset/metadata.csv" "$METADATA_COPY" \
         && echo "cached $(du -h "$CACHE_ARCHIVE" | cut -f1) for the next run" \
         || echo "WARNING: could not cache the result; the next run will rebuild"
 
     # The raw audio is the bulk of the disk and is finished with, while the
-    # cache that replaces it is a thousandth of the size.
+    # cache that replaces it is a thousandth of its size. Keeping it on the
+    # volume would rent 35 GB by the month for something a datacentre re-fetches
+    # in minutes, so it goes unless explicitly asked for.
+    if [ "${KEEP_DATASETS:-0}" = "1" ]; then
+        echo "keeping the raw corpora on the volume (KEEP_DATASETS=1)"
+        mkdir -p "$PERSIST/dataset"
+        cp -r "$REPO_DIR/dataset/." "$PERSIST/dataset/" 2>/dev/null || true
+    fi
     rm -rf "$REPO_DIR/MyTTSDataset/wavs" "$REPO_DIR/dataset" || true
 fi
 

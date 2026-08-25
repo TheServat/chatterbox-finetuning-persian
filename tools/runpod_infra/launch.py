@@ -222,6 +222,14 @@ def build_spec(args, control_token: str, volume: dict | None, gpu_ids: list[str]
         f"--port {CONTROL_PORT} --root /workspace"
     )
 
+    # ManaTTS alone is 33 GB of parquet and expands to roughly the same again in
+    # wav, so the disk has to be sized from what is actually being built.
+    disk = args.container_disk
+    if disk is None:
+        disk = 120 if "mana_hf" in args.sources else 60
+        if "youtube" in args.sources:
+            disk += 60
+
     spec = {
         "name": args.name,
         "imageName": args.image,
@@ -230,7 +238,7 @@ def build_spec(args, control_token: str, volume: dict | None, gpu_ids: list[str]
         "gpuCount": 1,
         "gpuTypeIds": gpu_ids,
         "gpuTypePriority": "custom",
-        "containerDiskInGb": args.container_disk,
+        "containerDiskInGb": disk,
         "ports": [f"{CONTROL_PORT}/http"],
         "dockerStartCmd": ["bash", "-lc", start],
         "env": {
@@ -240,9 +248,14 @@ def build_spec(args, control_token: str, volume: dict | None, gpu_ids: list[str]
             "HF_TOKEN": os.environ.get("HF_TOKEN", ""),
             "TRAIN_ARGS": train_args,
             "DATASET_SOURCES": args.sources,
+            "KEEP_DATASETS": "1" if args.keep_datasets else "0",
             "HOURLY_RATE": str(args.hourly_rate or 0),
             "DATA_TIMEOUT": str(args.setup_timeout),
             "HF_HUB_ENABLE_HF_TRANSFER": "0",
+            # Only so the pod's watchdog can delete itself if this launcher dies.
+            "RUNPOD_API_KEY": os.environ.get("RUNPOD_API_KEY", ""),
+            "IDLE_LIMIT": str(int(args.idle_limit)),
+            "MAX_LIFETIME": str(int(args.max_hours * 3600 * 1.5)),
         },
     }
 
@@ -253,7 +266,7 @@ def build_spec(args, control_token: str, volume: dict | None, gpu_ids: list[str]
             # A network volume only attaches inside its own datacenter.
             spec["dataCenterIds"] = [datacenter]
     else:
-        spec["volumeInGb"] = args.container_disk
+        spec["volumeInGb"] = disk
 
     return spec
 
@@ -296,22 +309,43 @@ def render(status: dict, started: float, rate: float) -> str:
     return "  ".join(parts)
 
 
-def collect_results(pod: Pod, out_dir: Path) -> None:
+def collect_results(pod: Pod, out_dir: Path, *, expect_adapter: bool) -> bool:
+    """Bring everything back. Returns whether the trained adapter arrived intact.
+
+    The adapter is the only irreplaceable output - the logs can be re-read and
+    the corpus rebuilt, but hours of training cannot. So it is retried, and its
+    archive is opened to prove it is not truncated before anyone acts on a
+    "downloaded" message.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
+
     for remote, local in (
-        ("persian_adapter.tar.gz", out_dir / "persian_adapter.tar.gz"),
-        ("samples.tar.gz", out_dir / "samples.tar.gz"),
         ("train.log", out_dir / "train.log"),
         ("bootstrap.log", out_dir / "bootstrap.log"),
+        ("preprocess.log", out_dir / "preprocess.log"),
         ("status.json", out_dir / "status.json"),
+        ("samples.tar.gz", out_dir / "samples.tar.gz"),
     ):
         pod.download(remote, local)
 
+    if not expect_adapter:
+        return True
+
     archive = out_dir / "persian_adapter.tar.gz"
-    if archive.exists():
-        with tarfile.open(archive) as tar:
-            tar.extractall(out_dir, filter="data")
-        log(f"adapter extracted to {out_dir / 'persian_adapter'}")
+    for attempt in range(1, 4):
+        if pod.download("persian_adapter.tar.gz", archive) and archive.exists():
+            try:
+                with tarfile.open(archive) as tar:
+                    tar.extractall(out_dir, filter="data")
+                log(f"adapter verified and extracted to {out_dir / 'persian_adapter'}")
+                return True
+            except Exception as error:
+                log(f"the adapter archive is unreadable ({error}); retrying")
+                archive.unlink(missing_ok=True)
+        log(f"adapter download attempt {attempt}/3 failed")
+        time.sleep(10)
+
+    return False
 
 
 def monitor(pod: Pod, args, started: float) -> tuple[bool, str]:
@@ -358,9 +392,16 @@ def monitor(pod: Pod, args, started: float) -> tuple[bool, str]:
         idle = time.time() - last_progress_at
         if phase == "training" and idle > args.stall_timeout:
             return False, f"no progress for {idle / 60:.0f} min"
-        if phase in ("setup", "models", "extracting", "cloning", "booting") \
+        if phase in ("setup", "models", "cloning", "booting", "data") \
                 and elapsed > args.setup_timeout:
             return False, f"setup exceeded {args.setup_timeout / 60:.0f} min"
+
+        # Downloading and preprocessing the corpus is legitimately slow - tens of
+        # GB and tens of thousands of clips - so it gets its own, longer ceiling
+        # rather than tripping the setup one.
+        if phase in ("downloading_datasets", "building_dataset", "preprocessing") \
+                and elapsed > args.build_timeout:
+            return False, f"corpus build exceeded {args.build_timeout / 3600:.1f} h"
 
         print(f"\r  {render(status, started, args.hourly_rate)}   ", end="", flush=True)
         time.sleep(args.poll_seconds)
@@ -403,7 +444,8 @@ def main() -> int:
     parser.add_argument("--gpu", action="append", help="GPU id, repeatable, in order")
     parser.add_argument("--image", default=DEFAULT_IMAGE)
     parser.add_argument("--cloud", default="SECURE", choices=["SECURE", "COMMUNITY"])
-    parser.add_argument("--container-disk", type=int, default=60)
+    parser.add_argument("--container-disk", type=int, default=None,
+                        help="ephemeral disk in GB; sized from --sources if unset")
     parser.add_argument("--name", default="chatterbox-fa")
     parser.add_argument("--repo", default="https://github.com/TheServat/chatterbox-finetuning-persian.git")
     parser.add_argument("--branch", default="main")
@@ -418,6 +460,9 @@ def main() -> int:
 
     parser.add_argument("--sources", default="yoda narration mana_hf",
                         help="corpora the pod downloads and builds, space separated")
+    parser.add_argument("--keep-datasets", action="store_true",
+                        help="also keep the raw corpora on the volume; only worth "
+                             "it when iterating on the corpus filters")
     parser.add_argument("--upload-cache", action="store_true",
                         help="push the local preprocessed cache instead of letting "
                              "the pod rebuild it; only worth it on a fast uplink")
@@ -432,6 +477,9 @@ def main() -> int:
     parser.add_argument("--stall-timeout", type=float, default=DEFAULTS["stall_timeout"])
     parser.add_argument("--build-timeout", type=float, default=4 * 3600,
                         help="ceiling on downloading and preprocessing the corpus")
+    parser.add_argument("--idle-limit", type=float, default=3600,
+                        help="seconds without a check-in before the pod deletes "
+                             "itself; the safety net if this machine dies")
     parser.add_argument("--keep-pod", action="store_true",
                         help="leave the pod running at the end (it keeps billing)")
     args = parser.parse_args()
@@ -476,7 +524,7 @@ def main() -> int:
             args.volume_name, args.volume_gb, args.datacenter
         )
         spec = build_spec(args, control_token, volume, gpu_ids)
-        log(f"creating pod ({args.cloud}, {args.container_disk} GB disk)")
+        log(f"creating pod ({args.cloud}, sources: {args.sources})")
         pod_info = api.create_pod(spec)
         pod_id = pod_info["id"]
         _ACTIVE_POD = pod_id
@@ -531,8 +579,18 @@ def _finish(pod: Pod, args, succeeded: bool, reason: str, started: float) -> int
             for line in (status.get("train_log") or status.get("setup_log") or [])[-15:]:
                 print(f"    {line}")
 
-    log("collecting whatever is there")
-    collect_results(pod, args.out)
+    log("collecting results")
+    got_adapter = collect_results(pod, args.out, expect_adapter=succeeded)
+
+    if succeeded and not got_adapter:
+        # A few more cents of GPU is a trivial price next to losing the run.
+        log("THE TRAINED ADAPTER COULD NOT BE DOWNLOADED - leaving the pod up")
+        log(f"  retry:     python -m tools.runpod_infra.launch --adopt {pod.id}")
+        log(f"  console:   https://console.runpod.io/pods/{pod.id}")
+        log("  it is also on the network volume, so a later pod can fetch it")
+        log("  when you have it:  python -m tools.runpod_infra.launch --cleanup")
+        _ACTIVE_POD = None
+        return 3
 
     if args.keep_pod:
         log(f"leaving pod {pod.id} running as asked - it is still billing")
