@@ -60,8 +60,15 @@ step "python interpreter"
 # is the system interpreter, which has never heard of it. Assuming either one
 # fails a minute in with ModuleNotFoundError, so the interpreter is chosen by
 # asking each candidate whether it can actually import torch.
+# The most reliable pointer is pip itself: whichever environment owns the pip on
+# PATH is the one the image configured, and its interpreter sits beside it.
+# Guessing venv paths found nothing on this image and cost a 2.5 GB reinstall.
+PIP_BIN="$(command -v pip3 || command -v pip || true)"
+PIP_DIR="${PIP_BIN%/*}"
+
 PY=""
-for candidate in /venv/main/bin/python /venv/bin/python /opt/conda/bin/python \
+for candidate in "$PIP_DIR/python" "$PIP_DIR/python3" \
+                 /venv/main/bin/python /venv/bin/python /opt/conda/bin/python \
                  /usr/local/bin/python3 "$(command -v python3)"; do
     [ -x "$candidate" ] || continue
     if "$candidate" -c "import torch" >/dev/null 2>&1; then
