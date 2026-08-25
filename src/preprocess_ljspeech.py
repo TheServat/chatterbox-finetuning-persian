@@ -13,8 +13,15 @@ from src.persian.normalize import normalize as normalize_fa
 
 logger = setup_logger(__name__)
 
-def preprocess_dataset_ljspeech(config, tts_engine: ChatterboxTTS):
-    
+def preprocess_dataset_ljspeech(config, tts_engine: ChatterboxTTS, force: bool = False):
+    """Cache speaker embedding, speech tokens and text tokens for every clip.
+
+    Clips already cached are skipped unless `force` is set. This run takes hours
+    over tens of thousands of files, so being able to resume after a crash - or
+    to top up after only a handful of transcripts changed - matters more than
+    the cost of a `os.path.exists` per clip.
+    """
+
     data = pd.read_csv(config.csv_path, sep="|", header=None, quoting=3)
     
     os.makedirs(config.preprocessed_dir, exist_ok=True)
@@ -28,6 +35,7 @@ def preprocess_dataset_ljspeech(config, tts_engine: ChatterboxTTS):
     logger.info(f"Processing dataset... Total: {len(data)}")
 
     success_count = 0
+    skipped_count = 0
 
     SPEECH_STOP_ID = getattr(tts_engine.t3.hp, 'stop_speech_token', 6562)
     for idx, row in tqdm(data.iterrows(), total=len(data)):
@@ -41,6 +49,13 @@ def preprocess_dataset_ljspeech(config, tts_engine: ChatterboxTTS):
             wav_path = os.path.join(config.wav_dir, filename)
             
             if not os.path.exists(wav_path): 
+                continue
+
+            save_path = os.path.join(
+                config.preprocessed_dir, filename.replace(".wav", ".pt")
+            )
+            if not force and os.path.exists(save_path):
+                skipped_count += 1
                 continue
 
 
@@ -109,8 +124,6 @@ def preprocess_dataset_ljspeech(config, tts_engine: ChatterboxTTS):
                 text_tokens = tts_engine.tokenizer.text_to_tokens(clean_text).squeeze(0).cpu()
 
 
-            save_path = os.path.join(config.preprocessed_dir, filename.replace(".wav", ".pt"))
-            
             torch.save({
                 "speech_tokens": speech_tokens,
                 "speaker_emb": speaker_emb,
@@ -124,7 +137,10 @@ def preprocess_dataset_ljspeech(config, tts_engine: ChatterboxTTS):
             logger.error(f"Error ({filename}): {e}")
             continue
         
-    logger.info(f"Preprocessing completed! Success: {success_count}/{len(data)}")
+    logger.info(
+        f"Preprocessing completed! New: {success_count}, "
+        f"already cached: {skipped_count}, total rows: {len(data)}"
+    )
     
     
 

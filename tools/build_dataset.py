@@ -36,6 +36,7 @@ import json
 import os
 import re
 import shutil
+import unicodedata
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
@@ -45,7 +46,13 @@ from typing import Iterator
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.persian.normalize import normalize, persian_ratio  # noqa: E402
+from src.persian.normalize import (  # noqa: E402
+    normalize,
+    persian_ratio,
+    unknown_characters,
+)
+
+TOKENIZER = ROOT / "pretrained_models" / "tokenizer_fa.json"
 
 DEFAULT_OUT = ROOT / "MyTTSDataset"
 
@@ -243,6 +250,53 @@ def clean_text(text: str) -> str:
     return _UNSAFE.sub(" ", str(text)).strip()
 
 
+class UnknownTextDetector:
+    """Finds text the tokenizer cannot represent, the way the tokenizer sees it.
+
+    Two-tier by design, because the two failure modes need opposite treatment:
+
+      * A character that is *silent* - emoji, bullets, decorative symbols - is
+        removed by `normalize()`, and the clip is kept. Rejecting it would throw
+        away good audio over a mark nobody pronounced.
+      * A character that is *pronounced* but unknown - Cyrillic, CJK - has to
+        take the clip with it. Stripping it would leave audio whose words are
+        missing from the transcript, which is how a model learns to say things
+        its input never contained.
+
+    So this catches the second kind, and it does so exactly. A cheap
+    per-character membership test is only a first pass: MTLTokenizer applies
+    NFKD before encoding, so a character absent from the vocabulary can still
+    decompose into pieces that are present. Anything the fast test flags is
+    confirmed by actually encoding it and looking for [UNK].
+    """
+
+    def __init__(self, tokenizer_path: Path):
+        from tokenizers import Tokenizer
+
+        data = json.loads(tokenizer_path.read_text(encoding="utf-8"))
+        self.vocabulary = set(data["model"]["vocab"])
+        self.tokenizer = Tokenizer.from_file(str(tokenizer_path))
+
+    def unknown(self, text: str) -> set[str]:
+        """Characters of `text` that would reach the model as [UNK]."""
+        suspects = unknown_characters(text, self.vocabulary)
+        if not suspects:
+            return set()
+
+        confirmed = set()
+        for char in suspects:
+            prepared = unicodedata.normalize("NFKD", char.lower())
+            if "[UNK]" in self.tokenizer.encode(prepared).tokens:
+                confirmed.add(char)
+        return confirmed
+
+
+def load_vocabulary() -> UnknownTextDetector | None:
+    if not TOKENIZER.exists():
+        return None
+    return UnknownTextDetector(TOKENIZER)
+
+
 def link_or_copy(source: Path, destination: Path) -> str:
     if destination.exists():
         destination.unlink()
@@ -294,6 +348,11 @@ def build(args: argparse.Namespace) -> int:
     if not args.dry_run:
         wav_dir.mkdir(parents=True, exist_ok=True)
 
+    vocabulary = load_vocabulary()
+    if vocabulary is None:
+        print("WARNING: no tokenizer in pretrained_models/, skipping the "
+              "out-of-vocabulary check. Run tools/fetch_models.py first.")
+
     rows: list[tuple[str, str, str]] = []
     seen_text: set[str] = set()
     per_source: dict[str, Stats] = {}
@@ -340,6 +399,15 @@ def build(args: argparse.Namespace) -> int:
             if persian_ratio(normalized) < args.min_persian:
                 stats.reject("not Persian enough")
                 continue
+
+            if vocabulary is not None:
+                unknown = vocabulary.unknown(normalized)
+                if unknown:
+                    stats.reject(
+                        "out-of-vocabulary "
+                        + "".join(sorted(f"U+{ord(c):04X}" for c in unknown)[:3])
+                    )
+                    continue
 
             if args.dedupe:
                 if normalized in seen_text:

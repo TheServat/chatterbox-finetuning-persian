@@ -114,6 +114,47 @@ _DIGIT_WORDS = ["صفر", "یک", "دو", "سه",
 _SPELL_OUT_ABOVE = 9
 
 
+# Characters with no pronunciation and no place in a transcript: emoji and
+# pictographs (So), private-use and unassigned code points, surrogates, and the
+# remaining invisible format characters. Left in, they reach the tokenizer as
+# [UNK] and teach the model that a real token can mean nothing at all.
+_DROP_CATEGORIES = {"So", "Co", "Cs", "Cn", "Cf"}
+
+
+def strip_unsupported(text: str) -> str:
+    """Remove characters that carry no sound, keeping ZWNJ."""
+    return "".join(
+        c for c in text
+        if c == ZWNJ or unicodedata.category(c) not in _DROP_CATEGORIES
+    )
+
+
+# "3م", "3ام", "10مین", "10امین" - the written form of a Persian ordinal.
+_ORDINAL = re.compile(r"(\d+)\s*(امین|مین|ام|م)(?![؀-ۿ])")
+
+# A clock time. Persian says "14 and 30 minutes", not "14 colon 30".
+_TIME = re.compile(r"(?<!\d)(\d{1,2}):([0-5]\d)(?!\d)")
+
+
+def _spell_ordinal(match: re.Match) -> str:
+    from num2words import num2words
+
+    number, suffix = match.group(1), match.group(2)
+    try:
+        word = num2words(int(number), lang="fa", to="ordinal")
+    except (NotImplementedError, ValueError, OverflowError):
+        return match.group(0)
+    return f" {word}ین " if suffix in ("مین", "امین") else f" {word} "
+
+
+def _spell_time(match: re.Match) -> str:
+    hour, minute = int(match.group(1)), int(match.group(2))
+    head = _num_to_words(str(hour))
+    if minute == 0:
+        return f" {head} "
+    return f" {head} و {_num_to_words(str(minute))} دقیقه "
+
+
 def _num_to_words(token: str) -> str:
     """Spell one numeric token out in Persian words."""
     from num2words import num2words
@@ -193,6 +234,7 @@ def normalize(
     # caught here rather than through _PUNCT_MAP.
     text = re.sub(r"\.{2,}", "، ", text)
     text = text.translate(_BIDI_AND_FORMAT)
+    text = strip_unsupported(text)
     text = _EZAFE_HEH.sub(_EZAFE_REPLACEMENT, text)
     text = text.translate(_LETTER_FOLD_TABLE)
 
@@ -200,11 +242,19 @@ def normalize(
         text = _HARAKAT.sub("", text)
 
     text = text.translate(_PUNCT_TABLE)
-    if fa_punctuation:
-        text = text.translate(_ASCII_TO_FA_TABLE)
 
     if spell_out_numbers:
+        # Times and ordinals first: both consume digits that would otherwise be
+        # read as plain cardinals.
+        text = _TIME.sub(_spell_time, text)
+        text = _ORDINAL.sub(_spell_ordinal, text)
         text = spell_numbers(text)
+
+    # Only after the numbers are words. Converting "," to "،" any earlier
+    # breaks thousands separators apart: "1,250,000" would be read as three
+    # separate numbers rather than one and a quarter million.
+    if fa_punctuation:
+        text = text.translate(_ASCII_TO_FA_TABLE)
 
     text = _tidy_zwnj(text)
     text = " ".join(text.split())

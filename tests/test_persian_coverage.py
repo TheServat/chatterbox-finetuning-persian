@@ -82,6 +82,26 @@ SENTENCES = [
     ("all-letters", "ثابت ژرف ضخیم ظریف غبار قند چشم پرواز گل ذوق"),
 ]
 
+# Text whose reading is not obvious, with the answer a Persian speaker expects.
+# Each of these was wrong at some point during development.
+READINGS = [
+    ("thousands separator", "مبلغ ۱٬۲۵۰٬۰۰۰ ریال", "یک میلیون و دویست و پنجاه هزار"),
+    ("decimal", "وزن ۷٫۵ کیلوگرم", "هفت ممیز پنج"),
+    ("percent", "حدود ۴۵٪ رشد", "چهل و پنج درصد"),
+    ("ordinal", "رتبه‌ی ۳م را گرفت", "سوم"),
+    ("ordinal -min", "۱۰مین دوره", "دهمین"),
+    ("clock time", "ساعت ۱۴:۳۰ قرار داریم", "چهارده و سی دقیقه"),
+    ("whole hour", "ساعت ۹:۰۰ صبح", "ساعت نه صبح"),
+    ("long digit run", "کد ملی ۰۰۱۲۳۴۵۶۷۸", "صفر صفر یک دو"),
+    ("tanwin survives", "لطفاً بنشینید", "لطفاً"),
+    ("ezafe unified", "خانۀ من", "خانه‌ی من"),
+    ("arabic folded", "كتاب‌هاي علمي", "کتاب‌های علمی"),
+]
+
+# Characters that must not survive into a transcript: nothing pronounces them,
+# and left in they reach the model as [UNK].
+SILENT_JUNK = ["😀", "👍", "★", "‍", "﻿"]
+
 
 def load_vocab() -> dict:
     for candidate in [
@@ -173,6 +193,24 @@ def audit(verbose: bool = True) -> list[str]:
     print("\n[8] Whole sentences")
     for label, sentence in SENTENCES:
         check(label, sentence)
+
+    print("\n[9] Readings that must come out a particular way")
+    for label, source, expected in READINGS:
+        out = normalize(source)
+        ok = expected in out
+        if not ok:
+            failures.append(f"{label}: expected {expected!r} within {out!r}")
+        if verbose:
+            print(f"  {'ok  ' if ok else 'FAIL'} {label:22s} {source!r} -> {out!r}")
+
+    print("\n[10] Silent characters are removed, not passed through")
+    for junk in SILENT_JUNK:
+        out = normalize(f"متن{junk}متن", final_punctuation=False)
+        ok = junk not in out
+        if not ok:
+            failures.append(f"U+{ord(junk):04X} survived normalisation: {out!r}")
+        if verbose:
+            print(f"  {'ok  ' if ok else 'FAIL'} U+{ord(junk):04X} removed -> {out!r}")
 
     return failures
 
