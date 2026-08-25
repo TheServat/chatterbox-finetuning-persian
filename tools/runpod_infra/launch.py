@@ -520,8 +520,15 @@ def main() -> int:
 
     parser.add_argument("--volume-name", default="chatterbox-fa")
     parser.add_argument("--volume-gb", type=int, default=20)
+    # Off by default, on evidence. A network volume forces Secure Cloud, where
+    # the same RTX 4090 costs $0.74/h against $0.34, and pins every future run
+    # to one datacentre - which is what blocked four launches. With the corpus
+    # rebuild down to a few minutes, keeping it is the more expensive option.
+    parser.add_argument("--volume", dest="use_volume", action="store_true",
+                        help="keep the corpus on a network volume between runs; "
+                             "forces SECURE cloud, roughly double the rate")
     parser.add_argument("--no-volume", action="store_true",
-                        help="skip the network volume; nothing survives the pod")
+                        help="default; nothing survives the pod")
     parser.add_argument("--delete-volume", action="store_true",
                         help="delete the network volume once results are downloaded")
     parser.add_argument("--datacenter", help="force a datacenter id")
@@ -631,9 +638,9 @@ def _attempt(args, estimates) -> int | None:
             log(f"--upload-cache given but {args.cache} does not exist")
             return 1
 
-        volume = None if args.no_volume else ensure_volume(
+        volume = ensure_volume(
             args.volume_name, args.volume_gb, args.datacenter
-        )
+        ) if args.use_volume else None
         if volume and args.cloud != "SECURE":
             log("a network volume forces SECURE cloud (RunPod restriction), "
                 "which costs roughly double")
@@ -830,7 +837,7 @@ def _finish(pod: Pod, args, succeeded: bool, reason: str, started: float) -> int
         remaining = [p for p in api.list_pods() if p.get("id") == pod.id]
         log("confirmed gone" if not remaining else "WARNING: pod still listed")
 
-    if args.delete_volume and not args.no_volume:
+    if args.delete_volume and args.use_volume:
         if volume := api.find_volume(args.volume_name):
             api.delete_volume(volume["id"])
             log(f"deleted network volume {args.volume_name}")
