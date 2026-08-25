@@ -87,8 +87,21 @@ class TrainConfig:
             "gate_proj", "up_proj", "down_proj", "spkr_enc",
         ]
     )
-    # The embedding and output head must train in full: [fa] is a brand-new row
-    # and the Persian character rows have only ever been trained for Arabic.
+    # How much of the text embedding table to train. Default is unchanged
+    # ("full"); the alternative exists to be measured against it.
+    #
+    #   full     train text_emb and text_head entirely
+    #   fa_only  train only the [fa] row, freezing everything else
+    #
+    # The case for "fa_only" is that our situation differs from the published
+    # multilingual LoRA work. Those projects added new scripts, so their new
+    # embedding rows started from noise and had to be trained. Every Persian
+    # letter already exists in this vocabulary (ids 1455-2357) and is already
+    # well trained, for Arabic - only [fa] itself is genuinely new. Rewriting
+    # 5M well-trained parameters at 1e-4 may be why the loss flattens.
+    #
+    # Untested here. Both reference implementations train no embeddings at all.
+    embedding_training: str = "full"
     lora_modules_to_save: List[str] = field(
         default_factory=lambda: ["text_emb", "text_head"]
     )

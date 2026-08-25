@@ -101,8 +101,45 @@ def apply_lora(cfg: TrainConfig, t3):
         modules_to_save=cfg.lora_modules_to_save,
     )
     model = get_peft_model(t3, peft_config)
+
+    if cfg.embedding_training == "fa_only":
+        _restrict_embedding_training(cfg, model)
+
     model.print_trainable_parameters()
     return model
+
+
+def _restrict_embedding_training(cfg: TrainConfig, model):
+    """Let gradients reach only the [fa] row of the embedding and head.
+
+    PEFT's modules_to_save trains a whole tensor or none of it, and there is no
+    middle setting - so the row mask is applied as a gradient hook instead. The
+    rows stay in the optimiser; their gradients are simply zeroed, which leaves
+    every other language's embedding exactly as it was pretrained.
+    """
+    import json
+
+    import torch
+
+    vocabulary = json.loads(cfg.tokenizer_path.read_text(encoding="utf-8"))
+    fa_id = vocabulary["model"]["vocab"].get("[fa]")
+    if fa_id is None:
+        logger.warning("no [fa] token in the tokenizer; leaving embeddings as they are")
+        return
+
+    def keep_only_fa(grad):
+        masked = torch.zeros_like(grad)
+        masked[fa_id] = grad[fa_id]
+        return masked
+
+    hooked = []
+    for name, parameter in model.named_parameters():
+        if parameter.requires_grad and name.endswith(("text_emb.weight", "text_head.weight")):
+            parameter.register_hook(keep_only_fa)
+            hooked.append(name.split(".")[-2])
+
+    logger.info(f"embedding_training=fa_only: only row {fa_id} of "
+                f"{', '.join(hooked) or 'nothing'} will change")
 
 
 def parse_args(argv=None):
@@ -119,6 +156,9 @@ def parse_args(argv=None):
     parser.add_argument("--grad-accum", type=int, help="override grad_accum")
     parser.add_argument("--lora-r", type=int, help="override lora_r")
     parser.add_argument("--lr", type=float, help="override learning_rate")
+    parser.add_argument("--embedding-training", choices=["full", "fa_only"],
+                        help="how much of the text embedding to train "
+                             "(default: full, as configured)")
     parser.add_argument("--workers", type=int, help="override dataloader workers")
     parser.add_argument("--save-steps", type=int, help="override save_steps")
     parser.add_argument("--output-dir", help="override output_dir")
@@ -164,6 +204,7 @@ def configure(args) -> TrainConfig:
         ("dataloader_num_workers", args.workers),
         ("save_steps", args.save_steps),
         ("output_dir", args.output_dir),
+        ("embedding_training", args.embedding_training),
     ):
         if value is not None:
             setattr(cfg, attr, value)
