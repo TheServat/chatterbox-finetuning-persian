@@ -113,10 +113,30 @@ def remote_files(repo_id: str) -> list[tuple[str, int]]:
     ]
 
 
+def _fast_transfer_available() -> bool:
+    """Whether hf_transfer is installed and switched on."""
+    if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER", "0") != "1":
+        return False
+    try:
+        import hf_transfer  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
 def fetch(repo_id: str, meta: dict, force: bool) -> bool:
-    # Deliberately not snapshot_download: it has no read timeout, so a
-    # connection that goes quiet without closing blocks forever. That happened
-    # here at 14 MB of 1 GB. tools/download.py times out and resumes.
+    # Two routes, for two very different links.
+    #
+    # tools/download.py exists because snapshot_download has no read timeout, so
+    # a connection that goes quiet without closing blocks forever - which
+    # happened here at 14 MB of 1 GB on a home connection. It resumes from a
+    # Range request instead, single-threaded.
+    #
+    # In a datacentre that single thread is the bottleneck: measured on a rented
+    # pod, the weights moved at 7 MB/s through hf_transfer while the corpora
+    # crawled at 2.1 MB/s through this. At that rate ManaTTS alone is four and a
+    # half hours of paid GPU time.
     sys.path.insert(0, str(ROOT))
     from tools.download import download, hf_url
 
@@ -149,14 +169,29 @@ def fetch(repo_id: str, meta: dict, force: bool) -> bool:
         return True
 
     print(f"  {repo_id}: {len(missing)} of {len(files)} files to fetch -> {raw}")
-    for path, size in missing:
-        print(f"    {path} ({human(size)})")
-        download(
-            hf_url(repo_id, path, repo_type="dataset"),
-            target / path,
-            expected_size=size or None,
-            token=token,
-        )
+
+    if _fast_transfer_available():
+        from huggingface_hub import hf_hub_download
+
+        print("    using hf_transfer (parallel)")
+        for path, size in missing:
+            print(f"    {path} ({human(size)})", flush=True)
+            hf_hub_download(
+                repo_id=repo_id,
+                filename=path,
+                repo_type="dataset",
+                local_dir=str(target),
+                token=token,
+            )
+    else:
+        for path, size in missing:
+            print(f"    {path} ({human(size)})")
+            download(
+                hf_url(repo_id, path, repo_type="dataset"),
+                target / path,
+                expected_size=size or None,
+                token=token,
+            )
 
     print(f"    done ({human(local_size(target))})")
     return True
