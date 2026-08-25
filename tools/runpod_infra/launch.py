@@ -73,7 +73,8 @@ VOLUME_MOUNT = "/workspace"
 
 DEFAULTS = {
     "pod_ready_timeout": 900,     # RUNNING, from creation
-    "server_timeout": 1200,       # control server answering, from RUNNING
+    "runtime_timeout": 360,       # container actually starting, from RUNNING
+    "server_timeout": 900,        # control server answering, once it has
     "setup_timeout": 3600,        # through dependencies, weights and extraction
     "stall_timeout": 1200,        # no step progress once training has begun
     "poll_seconds": 20,
@@ -708,6 +709,22 @@ def _attempt(args, estimates) -> int | None:
             return _finish(pod, args, False, "the pod never reached RUNNING", started)
 
         log("pod is running; waiting for its control server")
+
+        # RUNNING only means rented. A pod whose container never starts reports
+        # a null runtime indefinitely, and waiting the full server timeout on
+        # one costs twenty minutes of rent for nothing - worse on Secure Cloud,
+        # where the rate is double. Six minutes without a runtime is stuck.
+        if not wait_for(
+            lambda: ((api.graphql(
+                'query { pod(input:{podId:"%s"}) { runtime { uptimeInSeconds } } }' % pod_id
+            ).get("pod") or {}).get("runtime") is not None),
+            DEFAULTS["runtime_timeout"], 15, "the container to start",
+        ):
+            return _finish(pod, args, False,
+                           "the pod never reached RUNNING (container did not start)",
+                           started)
+        log("container is up; waiting for the control server")
+
         if not wait_for(pod.alive, DEFAULTS["server_timeout"], 10, "the control server"):
             return _finish(pod, args, False, "the control server never answered", started)
         log("control server is up")
