@@ -115,6 +115,34 @@ fi
 "$PY" -c "import transformers, peft, soundfile, num2words; print('support libraries ok')" \
     || fail "support libraries failed to import"
 
+step "link speed"
+# Community hosts are individually owned machines, so the connection is an
+# unknown until measured - and it decides whether rebuilding the corpus each
+# run is cheaper than renting persistent storage at Secure Cloud rates.
+LINK_START=$(date +%s)
+LINK_URL="https://huggingface.co/ResembleAI/chatterbox/resolve/main/s3gen.safetensors"
+LINK_BPS=$(curl -s -o /dev/null -w '%{speed_download}' --max-time 120 \
+    -r 0-104857599 "$LINK_URL" 2>/dev/null || echo 0)
+echo "  ${LINK_BPS} B/s on a 100 MB fetch, in $(( $(date +%s) - LINK_START ))s"
+awk -v bps="$LINK_BPS" 'BEGIN {
+    mb = bps / 1048576
+    printf "  %.1f MB/s", mb
+    if (mb < 10) print " - slow for a datacentre; the corpus rebuild will drag"
+    else print " - fast enough to rebuild the corpus cheaply"
+}'
+
+# The model weights need no GPU, so fetching them while CUDA settles costs
+# nothing and saves the wait. The CUDA check stays in the foreground because it
+# is the fail-fast one: a broken GPU should surface in the second minute, not
+# after 35 GB of corpus has been downloaded.
+phase models
+step "model weights (starting in the background)"
+mkdir -p "$MODELS_DIR"
+ln -sfn "$MODELS_DIR" "$REPO_DIR/pretrained_models"
+( "$PY" tools/fetch_models.py > "$WORKSPACE/fetch_models.log" 2>&1;   echo $? > "$WORKSPACE/fetch_models.rc" ) &
+MODELS_PID=$!
+echo "  running as pid $MODELS_PID while CUDA is checked"
+
 step "waiting for CUDA"
 # nvidia-smi can answer while CUDA context creation still fails with "CUDA
 # unknown error": the driver is visible but the device nodes are not ready.
@@ -147,29 +175,12 @@ print('bf16 native:', torch.cuda.get_device_capability(0)[0] >= 8)" \
     || fail "GPU check failed"
 
 # --------------------------------------------------------------------------
-phase models
-step "link speed"
-# Community hosts are individually owned machines, so the connection is an
-# unknown until measured - and it decides whether rebuilding the corpus each
-# run is cheaper than renting persistent storage at Secure Cloud rates.
-LINK_START=$(date +%s)
-LINK_URL="https://huggingface.co/ResembleAI/chatterbox/resolve/main/s3gen.safetensors"
-LINK_BPS=$(curl -s -o /dev/null -w '%{speed_download}' --max-time 120 \
-    -r 0-104857599 "$LINK_URL" 2>/dev/null || echo 0)
-echo "  ${LINK_BPS} B/s on a 100 MB fetch, in $(( $(date +%s) - LINK_START ))s"
-awk -v bps="$LINK_BPS" 'BEGIN {
-    mb = bps / 1048576
-    printf "  %.1f MB/s", mb
-    if (mb < 10) print " - slow for a datacentre; the corpus rebuild will drag"
-    else print " - fast enough to rebuild the corpus cheaply"
-}'
 
-step "model weights"
-# Kept on the network volume when there is one, so a second run skips the
-# 2 GB download entirely.
-mkdir -p "$MODELS_DIR"
-ln -sfn "$MODELS_DIR" "$REPO_DIR/pretrained_models"
-"$PY" tools/fetch_models.py || fail "fetching model weights failed"
+step "model weights (waiting for the background fetch)"
+wait "$MODELS_PID"
+MODELS_RC=$(cat "$WORKSPACE/fetch_models.rc" 2>/dev/null || echo 1)
+tail -5 "$WORKSPACE/fetch_models.log" 2>/dev/null
+[ "$MODELS_RC" = "0" ] || fail "fetching model weights failed - see fetch_models.log"
 
 # --------------------------------------------------------------------------
 phase data
