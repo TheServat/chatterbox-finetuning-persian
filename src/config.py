@@ -55,7 +55,7 @@ class TrainConfig:
     inference_prompt_path: str = "./speaker_reference/2.wav"
     inference_test_text: str = (
         "سلام، این یک آزمایش برای مدل گفتار فارسی است. "
-        "امیدوارم صدای طبیعی و روانی داشته باشد."
+        "امیدوارم صدای طبیعی و روان داشته باشد."
     )
 
     # --- Dataset format ---

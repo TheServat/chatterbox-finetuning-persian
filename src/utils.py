@@ -58,22 +58,20 @@ def trim_onset_artifact(
     max_scan_seconds: float = 0.35,
     fade_seconds: float = 0.01,
 ) -> np.ndarray:
-    """Cut the noise burst the decoder emits before speech actually starts.
+    """Drop the silence a clip opens with, and fade in so it does not click.
 
-    S3Gen's flow matching needs a few frames to settle, and what it emits in the
-    meantime is a short hiss rather than speech - measured on real output as
-    ~80 ms at zero-crossing rates of 0.5-0.8 against 0.14 for the speech that
-    follows. It is brief, but it is the first thing a listener hears, and it
-    reads as a robotic click at the start of every clip.
+    This also used to cut what it read as a decoder artifact: a stretch of
+    quiet, high-zero-crossing sound before the speech proper. That reading was
+    wrong. Measured against the test sentence, the frames it was keying on -
+    110 to 180 ms, zero-crossing rate 0.70 to 0.79, energy 6% of the speech
+    level - are the /s/ of "سلام". Sibilants are noisy and quiet by nature, so
+    the rule removed the first phoneme of any clip that began with one, which
+    a listener heard as "سلام" arriving unfinished. Before it, frames 0 to 100
+    measure exactly zero: there was no burst in that clip to remove.
 
-    This is a property of the decoder, not of an undertrained model, so more
-    training will not remove it.
-
-    Detection uses both energy and zero-crossing rate, because neither alone is
-    enough: the burst is quiet *and* noisy, while a soft speech onset is quiet
-    but not noisy. Only the first `max_scan_seconds` are considered, so a clip
-    that simply begins with a pause is left alone, and a fade-in replaces the
-    click that a hard cut would create.
+    Energy alone decides now, at a threshold 40 dB below the speech level -
+    below the quietest fricative, above digital silence - so no phoneme can
+    fall under it. The fade-in stays, because a hard cut into speech clicks.
     """
     if audio.size == 0:
         return audio
@@ -85,23 +83,20 @@ def trim_onset_artifact(
 
     frames = usable.reshape(-1, frame)
     energies = np.sqrt((frames ** 2).mean(axis=1))
-    crossings = (np.diff(np.sign(frames), axis=1) != 0).mean(axis=1)
 
     speech_level = float(np.percentile(energies, 90))
     if speech_level <= 0:
         return audio
 
-    loud_enough = energies > 0.08 * speech_level
-    tonal_enough = crossings < 0.35
-    speech_frames = np.flatnonzero(loud_enough & tonal_enough)
-    if speech_frames.size == 0:
+    audible = np.flatnonzero(energies > 0.01 * speech_level)
+    if audible.size == 0:
         return audio
 
-    start_frame = int(speech_frames[0])
+    start_frame = int(audible[0])
     scan_limit = int(max_scan_seconds * sample_rate / frame)
     if start_frame == 0 or start_frame > scan_limit:
         # Speech starts immediately, or the quiet stretch is longer than any
-        # decoder artifact and is therefore real silence worth keeping.
+        # onset silence and is therefore worth keeping.
         return audio
 
     trimmed = audio[start_frame * frame:]
