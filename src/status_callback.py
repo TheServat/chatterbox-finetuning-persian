@@ -146,11 +146,17 @@ def _gpu_snapshot() -> dict | None:
 
         if not torch.cuda.is_available():
             return None
+        # mem_get_info reports the whole card, not this process, so on a shared
+        # GPU it silently includes everyone else. Recording what torch itself
+        # holds alongside it is what makes the difference legible: an Ollama
+        # model loaded mid-run took a 6 GB card to 95% and slowed training from
+        # 7.4 to 30 s/step, and nothing in the logs said so.
         free, total = torch.cuda.mem_get_info()
         return {
             "name": torch.cuda.get_device_name(0),
             "mem_used_gb": round((total - free) / 2**30, 2),
             "mem_total_gb": round(total / 2**30, 2),
+            "reserved_gb": round(torch.cuda.memory_reserved() / 2**30, 2),
             "peak_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2),
         }
     except Exception:

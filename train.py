@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 import torch
-from transformers import Trainer, TrainingArguments
+from transformers import Trainer, TrainerCallback, TrainingArguments
 
 from src import compat  # noqa: F401  (adds T3's training hooks)
 from src.config import TrainConfig
@@ -228,6 +228,34 @@ def configure(args) -> TrainConfig:
     return cfg
 
 
+
+class _HonourSaveSteps(TrainerCallback):
+    """Make save_steps mean what this run asked for, after a resume.
+
+    Saves are decided from TrainerState, not from the arguments - see
+    `state.global_step % state.save_steps` in transformers' DefaultFlowCallback
+    - and resuming restores that state from the checkpoint. transformers spots
+    the disagreement and only warns, so `--save-steps 250` resumed from a
+    checkpoint written with 500 goes on saving every 500 steps. That is easy to
+    miss: nothing fails, a save point simply passes in silence, and here step
+    750 went by with no checkpoint and no audio sample.
+
+    on_train_begin runs after the state has been restored, which makes it the
+    one place this can be corrected.
+    """
+
+    def __init__(self, save_steps: int):
+        self.save_steps = save_steps
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        if state.save_steps != self.save_steps:
+            logger.info(
+                f"save_steps: honouring {self.save_steps} from this run's "
+                f"settings, not {state.save_steps} restored from the checkpoint"
+            )
+            state.save_steps = self.save_steps
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     cfg = configure(args)
@@ -293,6 +321,7 @@ def main(argv=None) -> int:
     # The callback samples from this very engine, so the audio reflects the
     # weights at that step and no second copy competes for VRAM.
     callbacks = [InferenceCallback(cfg, engine=engine)] if cfg.is_inference else []
+    callbacks.append(_HonourSaveSteps(cfg.save_steps))
 
     status = None
     if args.status_file:

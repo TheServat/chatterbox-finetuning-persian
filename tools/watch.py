@@ -128,7 +128,41 @@ def show_local() -> None:
                        f"{gpu.get('mem_total_gb', 0):.0f} GB")
         print(detail)
 
+    if status:
+        if warning := contention(status.get("gpu")):
+            print(warning)
+
     print(f"         written {human_age(log_age)}")
+
+
+def contention(gpu: dict | None) -> str | None:
+    """Whether something other than training is sitting on the card.
+
+    Worth a line of its own because the failure is silent. When a 6 GB card
+    fills up, Windows pages VRAM to system RAM rather than raising: utilisation
+    still reads 91%, the loss still falls, and only the step time gives it away
+    - here 7.4 s/step became 30 when Ollama loaded a 7B model beside training.
+    Reading a step time as slow needs a baseline; reading "3.1 GB is not yours"
+    does not.
+
+    mem_used_gb covers the whole card and reserved_gb covers this process, so
+    the gap is other processes plus our own CUDA context. The context alone is
+    a few hundred megabytes, hence a threshold rather than any gap at all.
+    """
+    if not gpu or "reserved_gb" not in gpu:
+        return None  # written by an older run, before this was recorded
+
+    used = gpu.get("mem_used_gb", 0)
+    total = gpu.get("mem_total_gb", 0)
+    elsewhere = used - gpu["reserved_gb"]
+
+    if elsewhere < 0.8 or not total:
+        return None
+
+    line = f"         {elsewhere:.1f} GB on this card is not training"
+    if used / total > 0.9:
+        line += f"  - card {used / total * 100:.0f}% full, expect slow steps"
+    return line
 
 
 def show_remote() -> None:
