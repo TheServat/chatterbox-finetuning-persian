@@ -121,7 +121,11 @@ step "link speed"
 # run is cheaper than renting persistent storage at Secure Cloud rates.
 LINK_START=$(date +%s)
 LINK_URL="https://huggingface.co/ResembleAI/chatterbox/resolve/main/s3gen.safetensors"
-LINK_BPS=$(curl -s -o /dev/null -w '%{speed_download}' --max-time 120 \
+# -L matters: HuggingFace answers with a 302 to its CDN, and without following
+# it curl measures the redirect body. That is how this reported "5160 B/s in 0s"
+# on a link that was actually doing about 11 MB/s.
+LINK_BPS=$(curl -sL -o /dev/null -w '%{speed_download}' --max-time 120 \
+    -H "Authorization: Bearer ${HF_TOKEN:-}" \
     -r 0-104857599 "$LINK_URL" 2>/dev/null || echo 0)
 echo "  ${LINK_BPS} B/s on a 100 MB fetch, in $(( $(date +%s) - LINK_START ))s"
 awk -v bps="$LINK_BPS" 'BEGIN {
