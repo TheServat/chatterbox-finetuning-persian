@@ -124,7 +124,12 @@
       "hours": 57,
       "sr": 44100,
       "license": "cc0",
-      "note": "ManaTTS as published on HuggingFace: 33 GB of parquet with decoded samples, carrying its own match_quality and CER columns. Used when no local wav copy exists - a rented GPU downloads this instead of waiting for an upload."
+      "note": "ManaTTS as published on HuggingFace: 33 GB of parquet with decoded samples, carrying its own match_quality and CER columns. Used when no local wav copy exists - a rented GPU downloads this instead of waiting for an upload.",
+      "local_alternative": {
+        "dir": "dataset/persian/manatts_full",
+        "format": "raw.csv + wav/",
+        "note": "A local wav copy of the same corpus. When it exists, build with --sources mana and skip the 33 GB download entirely; a rented GPU has no such copy and uses --sources mana_hf instead."
+      }
     },
     "pymmdrza/PERSIAN_FARSI_NARRATION": {
       "type": "hf_dataset",
