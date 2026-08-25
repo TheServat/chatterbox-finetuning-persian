@@ -165,6 +165,19 @@ class InferenceCallback(TrainerCallback):
             )
 
         finally:
+            # T3.inference caches a `patched_model` that wraps the same layers
+            # the trainer owns, so afterwards the state dict contains every
+            # weight twice under two names. safetensors refuses to write shared
+            # tensors, so the *next* checkpoint save dies - and takes the run
+            # with it, an hour after the sample that caused it. Dropping the
+            # cache here costs one rebuild per sample and nothing else.
+            for attribute in ("patched_model", "compiled"):
+                if hasattr(t3, attribute):
+                    try:
+                        delattr(t3, attribute)
+                    except Exception:
+                        setattr(t3, attribute, None if attribute == "patched_model" else False)
+
             engine.s3gen.to("cpu")
             engine.ve.to("cpu")
             if previous_attn and hasattr(t3.tfmr, "set_attn_implementation"):
