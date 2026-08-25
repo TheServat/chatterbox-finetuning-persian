@@ -294,12 +294,6 @@ def main(argv=None) -> int:
         fp16=precision == "fp16",
         max_steps=args.max_steps if args.max_steps else -1,
         gradient_checkpointing=cfg.gradient_checkpointing,
-        # Checkpoints go out as .bin rather than safetensors. safetensors
-        # refuses to write tensors that appear twice, and anything that wraps
-        # the model - an inference pass, a compile step - can leave exactly
-        # that. Losing a run hours later to a save failure costs far more than
-        # the slightly larger checkpoint files.
-        save_safetensors=False,
         seed=cfg.seed,
     )
 
