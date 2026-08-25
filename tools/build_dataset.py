@@ -77,7 +77,9 @@ class Clip:
     text: str
     speaker: str = "unknown"
     audio_path: Path | None = None     # already a file: hard-link it
-    audio_bytes: bytes | None = None   # embedded: decode and write
+    audio_bytes: bytes | None = None   # embedded container: decode and write
+    audio_array: object | None = None  # already-decoded samples
+    sample_rate: int | None = None     # required alongside audio_array
     quality: float | None = None       # dnsmos / MOS, where the corpus has one
     duration: float | None = None
 
@@ -148,6 +150,8 @@ def _parquet_clips(
     speaker_column: str | None = None,
     quality_column: str | None = None,
     key_column: str | None = None,
+    rate_column: str | None = None,
+    keep: "callable | None" = None,
 ) -> Iterator[Clip]:
     """Stream clips out of HuggingFace parquet shards, batch by batch."""
     import pyarrow.parquet as pq
@@ -157,7 +161,10 @@ def _parquet_clips(
         raise FileNotFoundError(f"no parquet shards under {root}")
 
     wanted = [c for c in (text_column, audio_column, speaker_column,
-                          quality_column, key_column) if c]
+                          quality_column, key_column, rate_column) if c]
+    if keep is not None:
+        # Filter columns have to be read as well, or the predicate sees nothing.
+        wanted += [c for c in getattr(keep, "columns", ())]
 
     index = 0
     for shard in shards:
@@ -167,9 +174,21 @@ def _parquet_clips(
         for batch in parquet.iter_batches(batch_size=256, columns=columns):
             for row in batch.to_pylist():
                 index += 1
+                if keep is not None and not keep(row):
+                    continue
                 audio = row.get(audio_column)
-                data = audio.get("bytes") if isinstance(audio, dict) else audio
-                if not data:
+                # Three shapes occur in the wild: a HuggingFace Audio struct, a
+                # bare encoded blob, and - in ManaTTS - already-decoded samples
+                # with the rate in a separate column.
+                data = array = None
+                if isinstance(audio, dict):
+                    data = audio.get("bytes")
+                    array = audio.get("array")
+                elif isinstance(audio, (bytes, bytearray)):
+                    data = audio
+                elif isinstance(audio, (list, tuple)):
+                    array = audio
+                if data is None and array is None:
                     continue
                 key = row.get(key_column) if key_column else None
                 yield Clip(
@@ -181,6 +200,8 @@ def _parquet_clips(
                     if speaker_column
                     else "unknown",
                     audio_bytes=data,
+                    audio_array=array,
+                    sample_rate=row.get(rate_column) if rate_column else None,
                     quality=row.get(quality_column) if quality_column else None,
                 )
 
@@ -195,6 +216,36 @@ def read_yoda(root: Path) -> Iterator[Clip]:
         speaker_column="speaker_id",
         quality_column="dnsmos",
         key_column="__key__",
+    )
+
+
+def _mana_hf_keep(row: dict) -> bool:
+    """ManaTTS ships its own alignment quality, so use it.
+
+    `match_quality` HIGH means the transcript matched the audio confidently and
+    `CER` is the character error rate of that match. Anything looser is a
+    transcript that does not quite say what the speaker said - the exact kind of
+    pair that teaches a mispronunciation.
+    """
+    if row.get("match_quality") not in (None, "HIGH"):
+        return False
+    cer = row.get("CER")
+    return cer is None or cer <= 0.05
+
+
+_mana_hf_keep.columns = ("match_quality", "CER")
+
+
+def read_mana_hf(root: Path) -> Iterator[Clip]:
+    """ManaTTS as published on HuggingFace: parquet with decoded samples."""
+    return _parquet_clips(
+        root,
+        prefix="mana",
+        text_column="transcript",
+        audio_column="audio",
+        key_column="file_name",
+        rate_column="sample_rate",
+        keep=_mana_hf_keep,
     )
 
 
@@ -230,6 +281,14 @@ SOURCES = {
         "default": True,
         "min_quality": 3.0,
         "note": "YodaLingua, CC-BY-4.0, 72 h over 678 speakers at 24 kHz. Primary corpus.",
+    },
+    "mana_hf": {
+        "reader": read_mana_hf,
+        "dir": "dataset/persian/Mana-TTS",
+        "default": False,
+        "min_quality": None,
+        "note": "ManaTTS straight from HuggingFace (33 GB of parquet). Use this "
+                "when the local wav copy is not available - e.g. on a rented GPU.",
     },
     "youtube": {
         "reader": read_youtube,
@@ -308,13 +367,29 @@ def link_or_copy(source: Path, destination: Path) -> str:
         return "copied"
 
 
-def write_decoded(data: bytes, destination: Path, target_sr: int | None) -> float:
-    """Decode embedded audio to a mono wav. Returns duration in seconds."""
+def write_decoded(clip: "Clip", destination: Path, target_sr: int | None) -> float:
+    """Write a clip's embedded audio to a mono wav. Returns duration in seconds."""
     import numpy as np
     import soundfile as sf
 
-    audio, sample_rate = sf.read(io.BytesIO(data), dtype="float32", always_2d=True)
-    audio = audio.mean(axis=1)
+    if clip.audio_bytes is not None:
+        audio, sample_rate = sf.read(
+            io.BytesIO(clip.audio_bytes), dtype="float32", always_2d=True
+        )
+        audio = audio.mean(axis=1)
+    else:
+        # Already-decoded samples, so the rate has to come from the corpus.
+        if not clip.sample_rate:
+            raise ValueError("decoded samples arrived without a sample rate")
+        audio = np.asarray(clip.audio_array, dtype=np.float32)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=-1)
+        sample_rate = int(clip.sample_rate)
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        if peak > 1.0:
+            # Integer PCM stored as numbers; scale to the float range soundfile
+            # expects rather than writing something that clips everywhere.
+            audio = audio / max(peak, 1.0)
 
     if target_sr and sample_rate != target_sr:
         import librosa
@@ -440,9 +515,7 @@ def build(args: argparse.Namespace) -> int:
                     duration = 0.0
                 else:
                     try:
-                        duration = write_decoded(
-                            clip.audio_bytes, destination, args.target_sr
-                        )
+                        duration = write_decoded(clip, destination, args.target_sr)
                     except Exception as exc:
                         stats.reject(f"decode failed ({type(exc).__name__})")
                         continue

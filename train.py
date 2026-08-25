@@ -121,6 +121,14 @@ def parse_args(argv=None):
         help="reuse the existing preprocess/ cache",
     )
     parser.add_argument(
+        "--status-file",
+        help="write structured progress here, for a remote watcher to poll",
+    )
+    parser.add_argument(
+        "--hourly-rate", type=float, default=0.0,
+        help="GPU price per hour, so the status file can report cost so far",
+    )
+    parser.add_argument(
         "--resume", action="store_true",
         help="continue from the newest checkpoint in output_dir - the way to "
              "survive a Colab disconnect without losing the run",
@@ -233,6 +241,17 @@ def main(argv=None) -> int:
     # weights at that step and no second copy competes for VRAM.
     callbacks = [InferenceCallback(cfg, engine=engine)] if cfg.is_inference else []
 
+    status = None
+    if args.status_file:
+        from src.status_callback import StatusCallback
+
+        status = StatusCallback(
+            args.status_file,
+            hourly_rate=args.hourly_rate,
+            extra={"config": cfg.describe()},
+        )
+        callbacks.append(status)
+
     # transformers 5.2 deprecated warmup_ratio in favour of warmup_steps, so the
     # ratio is resolved here against the actual step count.
     steps_per_epoch = max(
@@ -291,7 +310,14 @@ def main(argv=None) -> int:
             logger.info(f"--resume: no checkpoint in {cfg.output_dir}, starting fresh")
 
     logger.info("Training...")
-    trainer.train(resume_from_checkpoint=resume or None)
+    try:
+        trainer.train(resume_from_checkpoint=resume or None)
+    except Exception as exc:
+        # The watcher polls the status file; without this a crash looks
+        # identical to a hang, and the pod keeps billing until a timeout.
+        if status:
+            status.finish("failed", error=f"{type(exc).__name__}: {exc}")
+        raise
 
     if args.max_steps:
         peak = (
@@ -305,6 +331,8 @@ def main(argv=None) -> int:
             f"lora_r={cfg.lora_r} precision={precision}."
         )
         logger.info("Not saving: a few steps produce nothing worth keeping.")
+        if status:
+            status.finish("done")
         return 0
 
     logger.info("Saving...")
@@ -330,6 +358,8 @@ def main(argv=None) -> int:
         save_file(engine.t3.state_dict(), path)
         logger.info(f"Full model saved to {path}")
 
+    if status:
+        status.finish("done")
     return 0
 
 
