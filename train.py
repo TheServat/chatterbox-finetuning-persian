@@ -19,6 +19,7 @@ one row for `[fa]`, and seeds that row from `[ar]`.
 
 import os
 import sys
+from pathlib import Path
 
 import torch
 from transformers import Trainer, TrainingArguments
@@ -122,7 +123,8 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--status-file",
-        help="write structured progress here, for a remote watcher to poll",
+        help="write structured progress here (default: <output_dir>/status.json), "
+             "which is where tools/watch.py looks for it",
     )
     parser.add_argument(
         "--hourly-rate", type=float, default=0.0,
@@ -163,6 +165,11 @@ def configure(args) -> TrainConfig:
 
     if args.no_preprocess:
         cfg.preprocess = False
+
+    # Always write a status file. It costs nothing, and a run nobody can see the
+    # progress of is a run nobody notices has stalled.
+    if not args.status_file:
+        args.status_file = str(Path(cfg.output_dir) / "status.json")
 
     if args.sample:
         cfg.is_inference = True
