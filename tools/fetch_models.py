@@ -151,23 +151,53 @@ def salvage_partials(destination: Path) -> None:
     shutil.move(str(source), str(partial))
 
 
-def download(lock: dict, filename: str, destination: Path) -> None:
-    """Fetch one file straight into `pretrained_models/`, resuming if possible.
+def _fast_transfer_available() -> bool:
+    """Whether hf_transfer is installed and switched on."""
+    if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER", "0") != "1":
+        return False
+    try:
+        import hf_transfer  # noqa: F401
 
-    Deliberately not `hf_hub_download`: it has no read timeout, so a connection
-    that goes quiet without closing blocks forever. That happened repeatedly on
-    this link at the 1 GB mark. `tools/download.py` times out, resumes with a
-    Range request, and verifies the final size.
+        return True
+    except ImportError:
+        return False
+
+
+def download(lock: dict, filename: str, destination: Path) -> None:
+    """Fetch one file into `pretrained_models/`, by whichever route suits the link.
+
+    Two very different situations, and the wrong choice is expensive in both.
+
+    On a flaky home connection, `hf_hub_download` is the wrong tool: it has no
+    read timeout, so a socket that goes quiet without closing blocks forever -
+    which happened twice here, both times pinned at exactly 1 GB.
+    `tools/download.py` times out and resumes from a Range request instead.
+
+    In a datacentre the opposite holds. That single-threaded resume managed
+    about 4 MB/s on a rented pod, turning 3.3 GB of weights into thirteen
+    minutes of paid GPU time doing nothing. hf_transfer opens parallel
+    connections and is built for exactly that.
     """
+    if _fast_transfer_available():
+        from huggingface_hub import hf_hub_download
+
+        path = hf_hub_download(
+            repo_id=lock["weights"]["repo_id"],
+            filename=filename,
+            revision=lock["weights"]["revision"],
+            token=os.environ.get("HF_TOKEN") or None,
+            local_dir=str(destination.parent),
+        )
+        downloaded = Path(path)
+        if downloaded.resolve() != destination.resolve():
+            place(downloaded, destination)
+        return
+
     from tools.download import download as resumable_download, hf_url
 
     salvage_partials(destination)
-
-    url = hf_url(
-        lock["weights"]["repo_id"], filename, lock["weights"]["revision"]
-    )
     resumable_download(
-        url,
+        hf_url(lock["weights"]["repo_id"], filename, lock["weights"]["revision"]),
         destination,
         expected_size=lock["weights"]["files"].get(filename, {}).get("size"),
         token=os.environ.get("HF_TOKEN") or None,

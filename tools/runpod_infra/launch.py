@@ -60,6 +60,10 @@ DEFAULT_GPUS = [
 ]
 
 CONTROL_PORT = 8080
+# Where the live pod's id and control token are written, so anything else -
+# tools/watch.py, a later --adopt - can talk to it. Holds a bearer token, so it
+# is git-ignored.
+SESSION_PATH = ROOT / "runpod_session.json"
 CACHE_NAME = "preprocess_fa.tar.gz"
 VOLUME_MOUNT = "/workspace/persist"
 
@@ -150,6 +154,33 @@ class Pod:
                 return response.status == 200
         except Exception:
             return False
+
+
+def write_session(pod_id: str, token: str, rate: float, extra: dict | None = None) -> None:
+    """Record the running pod so other tools are not locked out of it.
+
+    Without this the control token lives only in this process, and a launcher
+    that dies takes with it the only way to reach a pod that is still billing.
+    """
+    SESSION_PATH.write_text(json.dumps({
+        "pod_id": pod_id,
+        "control_token": token,
+        "proxy": api.proxy_url(pod_id, CONTROL_PORT),
+        "hourly_rate": rate,
+        "started_at": time.time(),
+        **(extra or {}),
+    }, indent=1), encoding="utf-8")
+
+
+def clear_session() -> None:
+    SESSION_PATH.unlink(missing_ok=True)
+
+
+def read_session() -> dict | None:
+    try:
+        return json.loads(SESSION_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -251,7 +282,9 @@ def build_spec(args, control_token: str, volume: dict | None, gpu_ids: list[str]
             "KEEP_DATASETS": "1" if args.keep_datasets else "0",
             "HOURLY_RATE": str(args.hourly_rate or 0),
             "DATA_TIMEOUT": str(args.setup_timeout),
-            "HF_HUB_ENABLE_HF_TRANSFER": "0",
+            # A datacentre link is wasted on a single-threaded download: 3.3 GB
+            # of weights took 13.5 minutes of paid GPU time at ~4 MB/s.
+            "HF_HUB_ENABLE_HF_TRANSFER": "1",
             # Only so the pod's watchdog can delete itself if this launcher dies.
             "RUNPOD_API_KEY": os.environ.get("RUNPOD_API_KEY", ""),
             "IDLE_LIMIT": str(int(args.idle_limit)),
@@ -290,7 +323,20 @@ def render(status: dict, started: float, rate: float) -> str:
     training = status.get("training") or {}
     gpu = status.get("gpu") or {}
     elapsed = time.time() - started
-    parts = [f"{elapsed / 60:6.1f}m", f"{status.get('phase', '?'):<16}"]
+    phase = status.get("phase", "?")
+    parts = [f"{elapsed / 60:6.1f}m", f"{phase:<20}"]
+
+    # Before training starts there are no steps to report, and "downloading"
+    # for fifteen minutes with no other detail is indistinguishable from a
+    # hang. The setup log is the only thing that knows, so show its last line.
+    if phase not in ("training", "done", "failed"):
+        for line in reversed(status.get("setup_log") or []):
+            line = line.strip()
+            if line and not line.startswith(("===", "---")):
+                parts.append(line[:64])
+                break
+        if disk := status.get("disk"):
+            parts.append(f"{disk.get('free_gb', 0):.0f}G free")
 
     if step := training.get("step"):
         total = training.get("max_steps") or 0
@@ -525,8 +571,14 @@ def main() -> int:
 
     if args.adopt:
         pod_id = args.adopt
-        log(f"adopting pod {pod_id} (its control token must match CONTROL_TOKEN)")
-        control_token = os.environ.get("CONTROL_TOKEN", control_token)
+        session = read_session()
+        if session and session.get("pod_id") == pod_id:
+            control_token = session["control_token"]
+            args.hourly_rate = session.get("hourly_rate", args.hourly_rate)
+            log(f"adopting pod {pod_id} using the token from {SESSION_PATH.name}")
+        else:
+            control_token = os.environ.get("CONTROL_TOKEN", control_token)
+            log(f"adopting pod {pod_id} with CONTROL_TOKEN from the environment")
     else:
         if args.upload_cache and not args.cache.exists():
             log(f"--upload-cache given but {args.cache} does not exist")
@@ -571,8 +623,13 @@ def main() -> int:
                 log(f"NOTE: actual rate is ${actual:.2f}/h, not the estimated "
                     f"${args.hourly_rate:.2f}/h")
             args.hourly_rate = actual
-        log(f"pod {pod_id} created at ${args.hourly_rate:.2f}/h - "
-            f"console: https://console.runpod.io/pods/{pod_id}")
+        # RunPod has no per-pod deep link; only the list page exists.
+        log(f"pod {pod_id} created at ${args.hourly_rate:.2f}/h")
+        log("  console: https://console.runpod.io/pods")
+        write_session(pod_id, control_token, args.hourly_rate,
+                      {"sources": args.sources, "cloud": args.cloud})
+        log(f"  session written to {SESSION_PATH.name} - "
+            "`python tools/watch.py` can now read the pod directly")
 
         budget_hours = args.max_cost / args.hourly_rate if args.hourly_rate else 0
         log(f"budget: ${args.max_cost:.2f} = {budget_hours:.1f} h at this rate")
@@ -633,7 +690,7 @@ def _finish(pod: Pod, args, succeeded: bool, reason: str, started: float) -> int
         # A few more cents of GPU is a trivial price next to losing the run.
         log("THE TRAINED ADAPTER COULD NOT BE DOWNLOADED - leaving the pod up")
         log(f"  retry:     python -m tools.runpod_infra.launch --adopt {pod.id}")
-        log(f"  console:   https://console.runpod.io/pods/{pod.id}")
+        log("  console:   https://console.runpod.io/pods")
         log("  it is also on the network volume, so a later pod can fetch it")
         log("  when you have it:  python -m tools.runpod_infra.launch --cleanup")
         _ACTIVE_POD = None
@@ -645,6 +702,7 @@ def _finish(pod: Pod, args, succeeded: bool, reason: str, started: float) -> int
     else:
         try:
             api.terminate_pod(pod.id)
+            clear_session()
             log(f"terminated pod {pod.id}")
         except Exception as error:
             log(f"COULD NOT TERMINATE {pod.id}: {error}")

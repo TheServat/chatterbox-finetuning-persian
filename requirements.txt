@@ -17,6 +17,10 @@ peft>=0.17.0
 safetensors>=0.5.0
 tokenizers>=0.21.0
 huggingface_hub>=0.30.0
+# Parallel downloads. Only used when HF_HUB_ENABLE_HF_TRANSFER=1, which the
+# RunPod launcher sets: on a datacentre link it is the difference between
+# 4 MB/s and saturating the connection.
+hf_transfer
 
 # --- chatterbox model dependencies ---
 diffusers==0.29.0

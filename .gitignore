@@ -227,3 +227,6 @@ chatterbox_output/
 # Preprocessed feature cache
 **/preprocess/
 *.jsonl
+
+# Holds a live pod control token
+runpod_session.json
