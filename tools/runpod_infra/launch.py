@@ -550,6 +550,12 @@ def main() -> int:
     parser.add_argument("--idle-limit", type=float, default=3600,
                         help="seconds without a check-in before the pod deletes "
                              "itself; the safety net if this machine dies")
+    parser.add_argument("--retries", type=int, default=4,
+                        help="how many hosts to try when a pod turns out to be "
+                             "broken; each failed attempt costs a few cents")
+    parser.add_argument("--community-attempts", type=int, default=2,
+                        help="community hosts to try before escalating to "
+                             "SECURE, which is reliable but roughly double")
     parser.add_argument("--keep-pod", action="store_true",
                         help="leave the pod running at the end (it keeps billing)")
     args = parser.parse_args()
@@ -579,6 +585,18 @@ def main() -> int:
         log("no suitable GPU is available right now")
         return 1
 
+    args.attempt = 1
+    while True:
+        exit_code = _attempt(args, estimates)
+        if exit_code is not None:
+            return exit_code
+
+
+def _attempt(args, estimates) -> int | None:
+    """One pod, start to finish. Returns None to ask for another host."""
+    global _ACTIVE_POD
+
+    estimates = plan.rank(args.epochs, cloud=args.cloud) or estimates
     chosen = estimates[0]
     args.hourly_rate = chosen["price"]
 
@@ -710,7 +728,46 @@ def main() -> int:
     finally:
         print()
 
+    if not succeeded and is_host_fault(reason) and not args.adopt             and args.attempt < args.retries:
+        # A broken community host is not worth waiting on, and not worth paying
+        # Secure rates over either - until it happens repeatedly.
+        log(f"attempt {args.attempt}/{args.retries} hit a host fault: {reason}")
+        collect_results(pod, args.out / f"attempt{args.attempt}", expect_adapter=False)
+        try:
+            api.terminate_pod(pod.id)
+            clear_session()
+            log(f"  terminated {pod.id}; trying another host")
+        except Exception as error:
+            log(f"  could not terminate {pod.id}: {error}")
+        _ACTIVE_POD = None
+
+        args.attempt += 1
+        if args.attempt > args.community_attempts and args.cloud == "COMMUNITY":
+            log(f"  {args.community_attempts} community hosts failed; "
+                "escalating to SECURE, which costs roughly double but is "
+                "provisioned rather than peer-hosted")
+            args.cloud = "SECURE"
+        return None  # ask the caller for another host
+
     return _finish(pod, args, succeeded, reason, started)
+
+
+# Failures that belong to the machine, not to us. Community hosts are
+# individually owned and some are simply misconfigured - nvidia-smi answers
+# while CUDA refuses to initialise - so the fix is a different host, not a
+# longer wait. Anything else (our bug, a bad argument) would fail identically
+# on every host and must not be retried.
+HOST_FAULTS = (
+    "torch cannot see the GPU",
+    "no GPU visible in this pod",
+    "the control server never answered",
+    "the pod never reached RUNNING",
+    "pod is no longer running",
+)
+
+
+def is_host_fault(reason: str) -> bool:
+    return any(fault in reason for fault in HOST_FAULTS)
 
 
 def _finish(pod: Pod, args, succeeded: bool, reason: str, started: float) -> int:
