@@ -1,16 +1,23 @@
-"""One view of everything that is running: local training and any remote run.
+"""What is running right now, in a few lines.
 
 Progress ends up scattered - a tqdm bar redrawing itself in one log, a status
-JSON somewhere else, a launcher log for the pod - and none of it is pleasant to
-read directly. tqdm in particular writes with carriage returns, so a plain
-`tail` shows one enormous line.
+JSON somewhere else, a launcher log per attempt - and none of it reads well
+directly. tqdm writes with carriage returns, so a plain `tail` returns one
+enormous line.
 
-This pulls the useful parts out of whatever exists and prints a few lines.
-Nothing here talks to the trainer; it only reads files, so it is safe to run at
-any time and cannot disturb a run.
+The harder problem is telling live from dead. A directory accumulates logs from
+every run ever started, and showing a finished run beside a running one is worse
+than showing nothing: the first version of this printed step 575 from the live
+run directly above step 1,000 from a run that had died two hours earlier.
+
+So logs are discovered rather than named, the newest wins, and anything that has
+not been written to recently is summarised in one line instead of expanded.
+Nothing here talks to a trainer; it only reads files and polls a pod, so it is
+safe to run at any time.
 
     python tools/watch.py            # one look
     python tools/watch.py --watch    # refresh every 30 s
+    python tools/watch.py --all      # include finished runs
 """
 
 from __future__ import annotations
@@ -24,22 +31,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSION_PATH = ROOT / "runpod_session.json"
+STATUS_PATH = ROOT / "chatterbox_output" / "status.json"
+SAMPLES_DIR = ROOT / "chatterbox_output" / "inference_samples"
 
-# Where a training status file might be. The first that exists wins.
-STATUS_CANDIDATES = [
-    ROOT / "chatterbox_output" / "status.json",
-    ROOT / "status.json",
-]
+# A log untouched for this long belongs to a finished or dead run.
+LIVE_SECONDS = 900
 
-LOG_CANDIDATES = [
-    ("local", ROOT / "local_train.log"),
-    ("remote", ROOT / "runpod_test02.log"),
-    ("remote", ROOT / "runpod_test01.log"),
-]
-
-# transformers logs a dict per logging_steps; the numbers may be quoted.
 LOSS_LINE = re.compile(r"\{'loss':\s*'?([\d.eE+-]+)'?.*?'epoch':\s*'?([\d.eE+-]+)'?")
-# tqdm: "  12%|# | 520/4256 [57:55<7:19:20,  7.06s/it]"
 TQDM_LINE = re.compile(
     r"(\d+)%\|[^|]*\|\s*(\d+)/(\d+)\s*\[([\d:]+)<([\d:?]+),\s*([\d.]+)(s/it|it/s)"
 )
@@ -54,9 +52,8 @@ def read_json(path: Path) -> dict | None:
 
 def tail_text(path: Path, limit: int = 60000) -> str:
     try:
-        size = path.stat().st_size
         with path.open("rb") as handle:
-            handle.seek(max(0, size - limit))
+            handle.seek(max(0, path.stat().st_size - limit))
             return handle.read().decode("utf-8", "replace")
     except Exception:
         return ""
@@ -69,7 +66,16 @@ def last_match(pattern: re.Pattern, text: str):
     return found
 
 
+def age(path: Path) -> float:
+    try:
+        return time.time() - path.stat().st_mtime
+    except Exception:
+        return float("inf")
+
+
 def human_age(seconds: float) -> str:
+    if seconds == float("inf"):
+        return "never"
     if seconds < 90:
         return f"{seconds:.0f}s ago"
     if seconds < 5400:
@@ -77,209 +83,220 @@ def human_age(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h ago"
 
 
-def show_status_file(path: Path) -> bool:
-    state = read_json(path)
-    if not state:
-        return False
-
-    age = time.time() - state.get("updated_at", 0)
-    stale = "  (STALE)" if age > 600 else ""
-    print(f"  status  {path.name}  updated {human_age(age)}{stale}")
-
-    bits = []
-    if (step := state.get("step")) is not None:
-        total = state.get("max_steps")
-        bits.append(f"step {step:,}/{total:,}" if total else f"step {step:,}")
-    if (loss := state.get("loss")) is not None:
-        bits.append(f"loss {loss:.3f}")
-    if sps := state.get("samples_per_sec"):
-        bits.append(f"{sps} samp/s")
-    if (progress := state.get("progress")) is not None:
-        bits.append(f"{100 * progress:.1f}%")
-    if eta := state.get("eta_seconds"):
-        bits.append(f"eta {int(eta) // 3600}h{int(eta) % 3600 // 60:02d}m")
-    if cost := state.get("cost_so_far"):
-        bits.append(f"${cost:.2f}")
-    if bits:
-        print("          " + "   ".join(bits))
-
-    if gpu := state.get("gpu"):
-        print(f"          gpu {gpu.get('name', '?')}  "
-              f"{gpu.get('mem_used_gb', 0):.1f}/{gpu.get('mem_total_gb', 0):.0f} GB")
-    if state.get("error"):
-        print(f"          ERROR: {state['error']}")
-    return True
+def newest(pattern: str) -> Path | None:
+    """The most recently written file matching a glob, or None."""
+    matches = sorted(ROOT.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+    return matches[0] if matches else None
 
 
-def show_log(label: str, path: Path) -> None:
-    text = tail_text(path)
-    if not text.strip():
+def bar(fraction: float, width: int = 24) -> str:
+    filled = max(0, min(width, int(fraction * width)))
+    return "[" + "#" * filled + "-" * (width - filled) + "]"
+
+
+# --------------------------------------------------------------------------
+
+def show_local() -> None:
+    log = newest("local_train*.log")
+    status = read_json(STATUS_PATH)
+    log_age = age(log) if log else float("inf")
+    live = log_age < LIVE_SECONDS
+
+    if not log:
+        print("LOCAL    nothing has been run here")
         return
 
-    age = time.time() - path.stat().st_mtime
-    stale = "  (no new output)" if age > 600 else ""
-    print(f"\n  {label}  {path.name}  written {human_age(age)}{stale}")
+    if not live:
+        print(f"LOCAL    not running   ({log.name}, last written {human_age(log_age)})")
+        return
 
-    if bar := last_match(TQDM_LINE, text):
-        percent, done, total, elapsed, remaining, rate, unit = bar.groups()
-        per_step = f"{rate} {unit}"
-        print(f"          {percent}%  step {int(done):,}/{int(total):,}  "
-              f"elapsed {elapsed}  left {remaining}  {per_step}")
+    text = tail_text(log)
+    line = f"LOCAL    {log.name}"
+
+    if tq := last_match(TQDM_LINE, text):
+        percent, done, total, elapsed, remaining, rate, unit = tq.groups()
+        fraction = int(done) / max(int(total), 1)
+        print(f"LOCAL    {bar(fraction)} {percent}%   "
+              f"step {int(done):,}/{int(total):,}")
+        line = f"         elapsed {elapsed}   left {remaining}   {rate} {unit}"
+    print(line)
 
     if loss := last_match(LOSS_LINE, text):
-        print(f"          loss {float(loss.group(1)):.3f}  "
-              f"epoch {float(loss.group(2)):.3f}")
+        detail = f"         loss {float(loss.group(1)):.3f}   epoch {float(loss.group(2)):.2f}"
+        if status and (gpu := status.get("gpu")):
+            detail += (f"   gpu {gpu.get('mem_used_gb', 0):.1f}/"
+                       f"{gpu.get('mem_total_gb', 0):.0f} GB")
+        print(detail)
 
-    # Launcher lines are already one per line and worth showing verbatim.
-    interesting = [
-        line.strip() for line in text.replace("\r", "\n").splitlines()
-        if re.search(r"phase ->|STOPPING|finished|terminated|ERROR|FAILED|"
-                     r"created at|budget:|downloaded|cheapest", line)
-    ]
-    for line in interesting[-4:]:
-        print(f"          {line}")
+    print(f"         written {human_age(log_age)}")
 
 
-def show_remote_pod() -> bool:
-    """Ask a live pod how it is doing, rather than inferring it from a log.
-
-    The launcher writes its pod id and control token to runpod_session.json for
-    exactly this: without them the pod is only reachable from the process that
-    created it, which is no help when that process is busy watching.
-    """
+def show_remote() -> None:
     session = read_json(SESSION_PATH)
-    if not session or not session.get("pod_id"):
-        # No session, but a pod may still be running - from an older launcher,
-        # or one somebody started by hand. Anything billing is worth showing.
-        return show_pods_from_api()
+    log = newest("runpod_*.log")
 
-    import urllib.request
+    if session and session.get("pod_id"):
+        show_live_pod(session)
+        return
 
-    pod_id = session["pod_id"]
-    request = urllib.request.Request(f"{session['proxy']}/status")
-    request.add_header("Authorization", f"Bearer {session['control_token']}")
-    request.add_header("User-Agent", "chatterbox-watch/1.0")
+    if not log:
+        print("REMOTE   nothing has been run")
+        return
 
-    print(f"\n  pod  {pod_id}  ({session.get('cloud', '?')}, "
-          f"${session.get('hourly_rate', 0):.2f}/h)")
+    log_age = age(log)
+    if log_age < LIVE_SECONDS:
+        # No session file, but the log is fresh. Either a launcher is between
+        # attempts, or one was killed and its last lines still name a pod that
+        # is gone. The account is the only authority on what is actually
+        # billing, so ask it rather than inferring from a log.
+        running = account_pods()
+        if running:
+            print(f"REMOTE   {len(running)} pod(s) billing, no session file "
+                  f"(started outside this launcher?)")
+            for pod in running:
+                print(f"         {pod.get('id')}  {pod.get('desiredStatus')}  "
+                      f"${pod.get('costPerHr', 0):.2f}/h")
+            print("         detail needs a session; "
+                  "python -m tools.runpod_infra.launch --cleanup stops them")
+        else:
+            print(f"REMOTE   nothing running   ({log.name}, {human_age(log_age)})")
+            outcome = interesting_lines(tail_text(log))
+            if outcome:
+                print(f"         last: {outcome[-1][:88]}")
+        return
 
-    try:
-        with urllib.request.urlopen(request, timeout=45) as response:
-            status = json.loads(response.read().decode("utf-8"))
-    except Exception as error:
-        elapsed = time.time() - session.get("started_at", time.time())
-        print(f"          unreachable ({type(error).__name__}) - "
-              f"up {elapsed / 60:.0f} min")
-        print("          the pod may still be booting; the launcher log knows more")
-        return True
-
-    elapsed = time.time() - session.get("started_at", time.time())
-    cost = elapsed / 3600 * session.get("hourly_rate", 0)
-    print(f"          phase {status.get('phase', '?')}   "
-          f"up {elapsed / 60:.0f} min   spent ${cost:.2f}")
-
-    training = status.get("training") or {}
-    bits = []
-    if (step := training.get("step")) is not None:
-        total = training.get("max_steps")
-        bits.append(f"step {step:,}/{total:,}" if total else f"step {step:,}")
-    if (loss := training.get("loss")) is not None:
-        bits.append(f"loss {loss:.3f}")
-    if sps := training.get("samples_per_sec"):
-        bits.append(f"{sps} samp/s")
-    if eta := training.get("eta_seconds"):
-        bits.append(f"eta {int(eta) // 3600}h{int(eta) % 3600 // 60:02d}m")
-    if bits:
-        print("          " + "   ".join(bits))
-
-    if gpu := status.get("gpu"):
-        print(f"          gpu {gpu.get('util_percent', '?')}%  "
-              f"{gpu.get('mem_used_gb', 0):.1f}/{gpu.get('mem_total_gb', 0):.0f} GB  "
-              f"{gpu.get('temperature_c', '?')}C")
-    if disk := status.get("disk"):
-        print(f"          disk {disk.get('free_gb', 0):.0f} GB free")
-    if status.get("error"):
-        print(f"          ERROR: {status['error']}")
-
-    for line in (status.get("train_log") or status.get("setup_log") or [])[-3:]:
-        print(f"          | {line[:96]}")
-    return True
+    outcome = interesting_lines(tail_text(log))
+    summary = outcome[-1] if outcome else "no outcome recorded"
+    print(f"REMOTE   not running   ({log.name}, {human_age(log_age)})")
+    print(f"         last: {summary[:88]}")
+    if running := account_pods():
+        print(f"         WARNING: {len(running)} pod(s) still billing - "
+              "python -m tools.runpod_infra.launch --cleanup")
 
 
-def show_pods_from_api() -> bool:
-    """List whatever is running on the account, without needing a control token.
-
-    This is the answer to "is anything costing me money right now", which is a
-    different question from "how is the training going" and deserves an answer
-    even when the detailed one is unavailable.
-    """
+def account_pods() -> list[dict]:
+    """What the RunPod account says is running, which is the only thing billing."""
     try:
         sys.path.insert(0, str(ROOT))
         from tools.runpod_infra import api
 
-        pods = api.list_pods()
+        return api.list_pods()
     except Exception:
-        return False
+        return []
 
-    if not pods:
-        return False
 
-    print("\n  runpod  (no session file; account-level view only)")
-    for pod in pods:
-        print(f"          {pod.get('id')}  {pod.get('desiredStatus')}  "
-              f"${pod.get('costPerHr', 0):.2f}/h  {pod.get('name', '')}")
-    print("          detail needs the control token the launcher holds; "
-          "see its log below")
-    return True
+def interesting_lines(text: str) -> list[str]:
+    wanted = re.compile(
+        r"STOPPING|finished:|terminated|host fault|escalating|created at|"
+        r"phase ->|COULD NOT|budget:"
+    )
+    return [
+        line.strip()
+        for line in text.replace("\r", "\n").splitlines()
+        if wanted.search(line)
+    ]
+
+
+def show_live_pod(session: dict) -> None:
+    import urllib.request
+
+    pod_id = session["pod_id"]
+    rate = session.get("hourly_rate", 0)
+    elapsed = time.time() - session.get("started_at", time.time())
+    header = (f"REMOTE   pod {pod_id}   {session.get('cloud', '?')}   "
+              f"${rate:.2f}/h   up {elapsed / 60:.0f}m   "
+              f"spent ${elapsed / 3600 * rate:.2f}")
+
+    request = urllib.request.Request(f"{session['proxy']}/status")
+    request.add_header("Authorization", f"Bearer {session['control_token']}")
+    request.add_header("User-Agent", "chatterbox-watch/1.0")
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            status = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        print(header)
+        print("         not answering yet - still booting, or already gone")
+        return
+
+    print(header)
+    training = status.get("training") or {}
+    phase = status.get("phase", "?")
+
+    if training.get("step") is not None:
+        total = training.get("max_steps") or 0
+        fraction = training["step"] / total if total else 0
+        print(f"         {bar(fraction)} {phase}   "
+              f"step {training['step']:,}/{total:,}")
+        bits = []
+        if (loss := training.get("loss")) is not None:
+            bits.append(f"loss {loss:.3f}")
+        if sps := training.get("samples_per_sec"):
+            bits.append(f"{sps} samp/s")
+        if eta := training.get("eta_seconds"):
+            bits.append(f"eta {int(eta) // 3600}h{int(eta) % 3600 // 60:02d}m")
+        if bits:
+            print("         " + "   ".join(bits))
+    else:
+        print(f"         {phase}")
+        # Before training there are no steps, so the setup log is the only
+        # sign of life - and "downloading" for ten minutes with nothing else
+        # is indistinguishable from a hang.
+        for line in reversed(status.get("setup_log") or []):
+            line = line.strip()
+            if line and not line.startswith(("===", "---", "|", "+")):
+                print(f"         {line[:88]}")
+                break
+
+    if gpu := status.get("gpu"):
+        print(f"         gpu {gpu.get('util_percent', 0)}%   "
+              f"{gpu.get('mem_used_gb', 0):.1f}/{gpu.get('mem_total_gb', 0):.0f} GB")
+    if status.get("error"):
+        print(f"         ERROR: {status['error'][:88]}")
 
 
 def show_samples() -> None:
-    directory = ROOT / "chatterbox_output" / "inference_samples"
-    if not directory.is_dir():
+    if not SAMPLES_DIR.is_dir():
         return
-    samples = sorted(directory.glob("*.wav"), key=lambda p: p.stat().st_mtime)
+    samples = [p for p in SAMPLES_DIR.glob("*.wav") if "trimmed" not in p.name]
     if not samples:
+        print("AUDIO    none yet")
         return
-    print(f"\n  audio samples  {len(samples)} in "
-          f"{directory.relative_to(ROOT)}")
-    for path in samples[-3:]:
-        age = time.time() - path.stat().st_mtime
-        print(f"          {path.name:<28} {path.stat().st_size / 1024:6.0f} KB  "
-              f"{human_age(age)}")
+    samples.sort(key=lambda p: p.stat().st_mtime)
+    latest = samples[-1]
+    print(f"AUDIO    {len(samples)} sample(s), newest {latest.name} "
+          f"({human_age(age(latest))})")
+    print(f"         {SAMPLES_DIR.relative_to(ROOT)}")
 
 
-def snapshot(extra_logs: list[Path]) -> None:
-    print("=" * 68)
+def snapshot(show_all: bool) -> None:
+    print("=" * 66)
     print(f"  {time.strftime('%H:%M:%S')}")
-
-    shown = any(show_status_file(p) for p in STATUS_CANDIDATES if p.exists())
-    if not shown:
-        # The launcher may have been pointed at a scratch directory.
-        for path in sorted(ROOT.glob("**/local_status.json"))[:1]:
-            show_status_file(path)
-
-    show_remote_pod()
-
-    for label, path in LOG_CANDIDATES:
-        if path.exists():
-            show_log(label, path)
-    for path in extra_logs:
-        if path.exists():
-            show_log("extra", path)
-
+    print()
+    show_local()
+    print()
+    show_remote()
+    print()
     show_samples()
-    print("=" * 68)
+
+    if show_all:
+        print("\nolder runs:")
+        for log in sorted(ROOT.glob("runpod_*.log"),
+                          key=lambda p: p.stat().st_mtime, reverse=True)[1:6]:
+            lines = interesting_lines(tail_text(log))
+            print(f"  {log.name:<24} {human_age(age(log)):>9}  "
+                  f"{(lines[-1] if lines else '')[:60]}")
+    print("=" * 66)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("logs", nargs="*", type=Path, help="extra log files")
     parser.add_argument("--watch", action="store_true", help="keep refreshing")
     parser.add_argument("--interval", type=float, default=30.0)
+    parser.add_argument("--all", action="store_true", help="also list finished runs")
     args = parser.parse_args()
 
     while True:
-        snapshot(args.logs)
+        snapshot(args.all)
         if not args.watch:
             return 0
         time.sleep(args.interval)
