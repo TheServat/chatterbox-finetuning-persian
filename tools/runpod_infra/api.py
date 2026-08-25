@@ -118,6 +118,8 @@ query {
     memoryInGb
     secureCloud
     communityCloud
+    securePrice
+    communityPrice
     maxGpuCount
     lowestPrice(input: {gpuCount: 1}) {
       uninterruptablePrice
@@ -140,6 +142,10 @@ def gpu_types() -> list[dict]:
             "name": entry["displayName"],
             "vram_gb": entry["memoryInGb"],
             "on_demand": price.get("uninterruptablePrice"),
+            # Distinct from the secure/community booleans below: a duplicate key
+            # let the boolean win, and max(True, 0.34) quietly became $1.00/h.
+            "secure_price": entry.get("securePrice"),
+            "community_price": entry.get("communityPrice"),
             "spot": price.get("minimumBidPrice"),
             "stock": price.get("stockStatus"),
             "secure": entry.get("secureCloud", False),

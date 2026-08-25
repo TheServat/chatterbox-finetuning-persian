@@ -53,13 +53,36 @@ mkdir -p "$PERSIST" "$WORKSPACE/incoming"
 phase setup
 step "environment"
 nvidia-smi || fail "no GPU visible in this pod"
-python3 --version
 df -h "$WORKSPACE" "$PERSIST" | tail -3
+
+step "python interpreter"
+# RunPod's PyTorch images keep torch inside a virtualenv while `python3` on PATH
+# is the system interpreter, which has never heard of it. Assuming either one
+# fails a minute in with ModuleNotFoundError, so the interpreter is chosen by
+# asking each candidate whether it can actually import torch.
+PY=""
+for candidate in /venv/main/bin/python /venv/bin/python /opt/conda/bin/python \
+                 /usr/local/bin/python3 "$(command -v python3)"; do
+    [ -x "$candidate" ] || continue
+    if "$candidate" -c "import torch" >/dev/null 2>&1; then
+        PY="$candidate"
+        echo "torch already present in $PY"
+        break
+    fi
+done
+if [ -z "$PY" ]; then
+    # Nothing has torch: fall back and let pip provide it. That works, at the
+    # cost of a few minutes and a couple of GB.
+    PY="$(command -v python3)"
+    echo "no preinstalled torch; installing into $PY"
+fi
+export PY
+"$PY" --version
 
 step "python dependencies"
 cd "$REPO_DIR" || fail "repository missing at $REPO_DIR"
-pip install --no-cache-dir -q -r requirements.txt || fail "pip install failed"
-python3 -c "import torch, transformers, peft, soundfile, num2words; \
+"$PY" -m pip install --no-cache-dir -q -r requirements.txt || fail "pip install failed"
+"$PY" -c "import torch, transformers, peft, soundfile, num2words; \
 print('torch', torch.__version__, 'cuda', torch.cuda.is_available()); \
 print('bf16 native:', torch.cuda.get_device_capability(0)[0] >= 8)" \
     || fail "dependency import failed"
@@ -71,7 +94,7 @@ step "model weights"
 # 2 GB download entirely.
 mkdir -p "$MODELS_DIR"
 ln -sfn "$MODELS_DIR" "$REPO_DIR/pretrained_models"
-python3 tools/fetch_models.py || fail "fetching model weights failed"
+"$PY" tools/fetch_models.py || fail "fetching model weights failed"
 
 # --------------------------------------------------------------------------
 phase data
@@ -91,10 +114,10 @@ else
     step "downloading corpora ($SOURCES)"
     for source in $SOURCES; do
         case "$source" in
-            yoda)      python3 tools/fetch_datasets.py yoda ;;
-            narration) python3 tools/fetch_datasets.py narration ;;
-            mana_hf)   python3 tools/fetch_datasets.py MahtaFetrat/Mana-TTS ;;
-            youtube)   python3 tools/fetch_datasets.py youtube ;;
+            yoda)      "$PY" tools/fetch_datasets.py yoda ;;
+            narration) "$PY" tools/fetch_datasets.py narration ;;
+            mana_hf)   "$PY" tools/fetch_datasets.py MahtaFetrat/Mana-TTS ;;
+            youtube)   "$PY" tools/fetch_datasets.py youtube ;;
         esac || fail "downloading $source failed"
     done
     df -h "$WORKSPACE" | tail -1
@@ -102,12 +125,12 @@ else
     phase building_dataset
     step "building the corpus"
     # shellcheck disable=SC2086
-    python3 tools/build_dataset.py --sources $SOURCES \
+    "$PY" tools/build_dataset.py --sources $SOURCES \
         --dedupe ${BUILD_ARGS:-} || fail "building the dataset failed"
 
     phase preprocessing
     step "preprocessing"
-    python3 -u -m src.preprocess_ljspeech >>"$WORKSPACE/preprocess.log" 2>&1 \
+    "$PY" -u -m src.preprocess_ljspeech >>"$WORKSPACE/preprocess.log" 2>&1 \
         || fail "preprocessing failed - see preprocess.log"
 
     step "saving the cache back to the volume"
@@ -140,7 +163,7 @@ mkdir -p "$OUTPUT_DIR"
 ln -sfn "$OUTPUT_DIR" "$REPO_DIR/chatterbox_output"
 
 # shellcheck disable=SC2086  # TRAIN_ARGS is deliberately word-split
-python3 -u train.py \
+"$PY" -u train.py \
     --no-preprocess \
     --status-file "$WORKSPACE/status.json" \
     --hourly-rate "${HOURLY_RATE:-0}" \

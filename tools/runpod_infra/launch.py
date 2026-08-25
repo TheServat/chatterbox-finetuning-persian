@@ -443,7 +443,10 @@ def main() -> int:
 
     parser.add_argument("--gpu", action="append", help="GPU id, repeatable, in order")
     parser.add_argument("--image", default=DEFAULT_IMAGE)
-    parser.add_argument("--cloud", default="SECURE", choices=["SECURE", "COMMUNITY"])
+    # Community is roughly half the price of secure for the same card. These runs
+    # are short, checkpointed and resumable, so the reliability premium is not
+    # worth paying.
+    parser.add_argument("--cloud", default="COMMUNITY", choices=["SECURE", "COMMUNITY"])
     parser.add_argument("--container-disk", type=int, default=None,
                         help="ephemeral disk in GB; sized from --sources if unset")
     parser.add_argument("--name", default="chatterbox-fa")
@@ -491,10 +494,10 @@ def main() -> int:
     if args.cleanup:
         return cmd_cleanup()
 
-    estimates = plan.rank(args.epochs)
+    estimates = plan.rank(args.epochs, cloud=args.cloud)
     if args.plan:
         for entry in estimates[:8]:
-            print(f"  {entry['name']:<16} ${entry['on_demand']:.2f}/h  "
+            print(f"  {entry['name']:<16} ${entry['price']:.2f}/h  "
                   f"{entry['hours']:.1f} h  ${entry['cost']:.2f}")
         return 0
 
@@ -503,9 +506,18 @@ def main() -> int:
         return 1
 
     chosen = estimates[0]
-    args.hourly_rate = chosen["on_demand"]
-    gpu_ids = args.gpu or DEFAULT_GPUS
-    log(f"cheapest suitable: {chosen['name']} at ${chosen['on_demand']:.2f}/h, "
+    args.hourly_rate = chosen["price"]
+
+    # Ask for exactly the cards that were ranked, in ranked order. Passing a
+    # fixed list while quoting a ranked estimate lets RunPod hand back a card
+    # nobody priced.
+    if args.gpu:
+        gpu_ids = args.gpu
+    else:
+        ranked_ids = [e["id"] for e in estimates if e["id"] in DEFAULT_GPUS]
+        gpu_ids = ranked_ids or DEFAULT_GPUS
+    log(f"cheapest suitable on {args.cloud}: {chosen['name']} at "
+        f"${chosen['price']:.2f}/h, "
         f"estimated {chosen['hours']:.1f} h / ${chosen['cost']:.2f}")
 
     control_token = secrets.token_urlsafe(32)
@@ -528,7 +540,20 @@ def main() -> int:
         pod_info = api.create_pod(spec)
         pod_id = pod_info["id"]
         _ACTIVE_POD = pod_id
-        log(f"pod {pod_id} created - console: https://console.runpod.io/pods/{pod_id}")
+
+        # Ground truth. Everything before this was an estimate from a price list
+        # that does not always match what gets rented.
+        actual = pod_info.get("costPerHr")
+        if actual:
+            if abs(actual - args.hourly_rate) > 0.01:
+                log(f"NOTE: actual rate is ${actual:.2f}/h, not the estimated "
+                    f"${args.hourly_rate:.2f}/h")
+            args.hourly_rate = actual
+        log(f"pod {pod_id} created at ${args.hourly_rate:.2f}/h - "
+            f"console: https://console.runpod.io/pods/{pod_id}")
+
+        budget_hours = args.max_cost / args.hourly_rate if args.hourly_rate else 0
+        log(f"budget: ${args.max_cost:.2f} = {budget_hours:.1f} h at this rate")
 
     _ACTIVE_POD = pod_id
     pod = Pod(pod_id, control_token)

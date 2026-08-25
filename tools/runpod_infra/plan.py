@@ -72,11 +72,24 @@ MIN_VRAM_GB = 16          # 4 GB peak measured, plus room to drop checkpointing
 CORPUS_CLIPS = 68_085
 
 
-def candidates(gpus: list[dict], *, min_vram: int = MIN_VRAM_GB) -> list[dict]:
-    """GPUs that can run this job, ranked by estimated total cost."""
+def candidates(gpus: list[dict], *, min_vram: int = MIN_VRAM_GB,
+               cloud: str = "COMMUNITY") -> list[dict]:
+    """GPUs that can run this job, priced for the cloud they will be rented from.
+
+    `lowestPrice` is the cheapest across both clouds, which is the community
+    price - renting the same card on SECURE costs roughly twice as much. Ranking
+    on the wrong one produced a pod at $0.74/h against a $0.34 estimate.
+    """
     ranked = []
     for gpu in gpus:
-        price = gpu.get("on_demand")
+        # The per-cloud fields and lowestPrice disagree for some cards - H100
+        # reports 1.00 against a lowest of 2.69 - and there is no way to tell
+        # from here which is stale. Planning takes the higher of the two:
+        # overestimating costs nothing, while underestimating is what produced
+        # a $0.74/h pod against a $0.34 estimate.
+        cloud_price = (gpu.get("secure_price") if cloud == "SECURE"
+                       else gpu.get("community_price"))
+        price = max(cloud_price or 0, gpu.get("on_demand") or 0) or None
         if not price or gpu["vram_gb"] < min_vram:
             continue
         if any(bad in gpu["name"] for bad in NO_BF16):
@@ -84,7 +97,7 @@ def candidates(gpus: list[dict], *, min_vram: int = MIN_VRAM_GB) -> list[dict]:
         speed = RELATIVE_SPEED.get(gpu["name"])
         if speed is None:
             continue  # unknown card: no honest estimate, so leave it out
-        ranked.append({**gpu, "relative_speed": speed})
+        ranked.append({**gpu, "relative_speed": speed, "price": price})
     return ranked
 
 
@@ -96,12 +109,16 @@ def estimate(gpu: dict, epochs: float, clips: int = CORPUS_CLIPS) -> dict:
         **gpu,
         "samples_per_sec": samples_per_sec,
         "hours": hours,
-        "cost": hours * gpu["on_demand"],
+        "cost": hours * gpu["price"],
     }
 
 
-def rank(epochs: float, *, min_vram: int = MIN_VRAM_GB) -> list[dict]:
-    estimates = [estimate(g, epochs) for g in candidates(api.gpu_types(), min_vram=min_vram)]
+def rank(epochs: float, *, min_vram: int = MIN_VRAM_GB,
+         cloud: str = "COMMUNITY") -> list[dict]:
+    estimates = [
+        estimate(g, epochs)
+        for g in candidates(api.gpu_types(), min_vram=min_vram, cloud=cloud)
+    ]
     estimates.sort(key=lambda e: e["cost"])
     return estimates
 
@@ -117,11 +134,12 @@ def main() -> int:
     parser.add_argument("--clips", type=int, default=CORPUS_CLIPS)
     parser.add_argument("--min-vram", type=int, default=MIN_VRAM_GB)
     parser.add_argument("--all", action="store_true", help="include out-of-stock GPUs")
+    parser.add_argument("--cloud", default="COMMUNITY", choices=["COMMUNITY", "SECURE"])
     args = parser.parse_args()
 
     estimates = [
         estimate(g, args.epochs, args.clips)
-        for g in candidates(api.gpu_types(), min_vram=args.min_vram)
+        for g in candidates(api.gpu_types(), min_vram=args.min_vram, cloud=args.cloud)
     ]
     estimates.sort(key=lambda e: e["cost"])
 
@@ -139,7 +157,7 @@ def main() -> int:
             continue
         cloud = "secure" if e["secure"] else ""
         cloud += "+community" if e["community"] and cloud else ("community" if e["community"] else "")
-        print(f"{e['name']:<16} {e['vram_gb']:>4}G {e['on_demand']:>6.2f} "
+        print(f"{e['name']:<16} {e['vram_gb']:>4}G {e['price']:>6.2f} "
               f"{e['hours']:>7.1f} {e['cost']:>7.2f} {stock:<12} {cloud}")
 
     if estimates:
