@@ -94,11 +94,17 @@ class TrainConfig:
     )
 
     # --- Hyperparameters ---
-    # Measured on a 6 GB Quadro RTX 3000 with LoRA r=32 and fp16: batch 1 peaks
-    # at 2.5 GB, 8 at 3.3 GB, 16 at 4.0 GB. 8 leaves room for the long clips
-    # that a short smoke-test subset does not contain.
-    batch_size: int = 8
-    grad_accum: int = 4      # effective batch = batch_size * grad_accum
+    # Sized for the worst batch, not the average one. A batch pads to its
+    # longest member, and measured across the corpus the spread is wide: speech
+    # tokens run 131 at the median against 501 at the maximum, text 63 against
+    # 282. So a batch that happens to catch one very long clip costs about 3.9x
+    # a typical one - which is how a 4.1 GB peak became 5.8 GB of a 6 GB card
+    # mid-run, and step time collapsed from 6.5 s to 37 s as it spilled to host
+    # memory.
+    #
+    # The effective batch is unchanged at 32; only the shape of it moved.
+    batch_size: int = 4
+    grad_accum: int = 8      # effective batch = batch_size * grad_accum
     learning_rate: float = 1e-4
     num_epochs: int = 5
     warmup_ratio: float = 0.03

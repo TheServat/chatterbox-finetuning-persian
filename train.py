@@ -40,6 +40,11 @@ from src.preprocess_ljspeech import preprocess_dataset_ljspeech
 from src.utils import setup_logger
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+# Sequence lengths here vary about fourfold, so every batch asks the allocator
+# for a different size and the free space fragments. Expandable segments let
+# CUDA grow one region instead of hunting for a contiguous block, which is what
+# turns a near-full card into a slow one.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 logger = setup_logger("ChatterboxFinetune")
 
