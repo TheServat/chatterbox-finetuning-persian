@@ -65,7 +65,11 @@ CONTROL_PORT = 8080
 # is git-ignored.
 SESSION_PATH = ROOT / "runpod_session.json"
 CACHE_NAME = "preprocess_fa.tar.gz"
-VOLUME_MOUNT = "/workspace/persist"
+# RunPod mounts a network volume for Pods at /workspace, and only there.
+# An arbitrary path is accepted by the API and then matches no machine, which
+# surfaces as "could not find any pods with required specifications" rather
+# than as a validation error.
+VOLUME_MOUNT = "/workspace"
 
 DEFAULTS = {
     "pod_ready_timeout": 900,     # RUNNING, from creation
@@ -257,9 +261,12 @@ def build_spec(args, control_token: str, volume: dict | None, gpu_ids: list[str]
     # wav, so the disk has to be sized from what is actually being built.
     disk = args.container_disk
     if disk is None:
-        disk = 120 if "mana_hf" in args.sources else 60
+        # Raw parquet plus the wavs the build writes, both present at once.
+        # At 16 kHz the wavs are half the size, which is what makes the full
+        # corpus placeable on community cloud at all.
+        disk = 80 if "mana_hf" in args.sources else 50
         if "youtube" in args.sources:
-            disk += 60
+            disk += 40
 
     spec = {
         "name": args.name,
@@ -279,6 +286,10 @@ def build_spec(args, control_token: str, volume: dict | None, gpu_ids: list[str]
             "HF_TOKEN": os.environ.get("HF_TOKEN", ""),
             "TRAIN_ARGS": train_args,
             "DATASET_SOURCES": args.sources,
+            # Preprocessing resamples everything to 16 kHz anyway - both the S3
+            # tokenizer and the voice encoder work there - so writing the wavs
+            # at the source rate doubles the disk and the read time for nothing.
+            "BUILD_ARGS": f"--target-sr {args.build_sr}" if args.build_sr else "",
             "KEEP_DATASETS": "1" if args.keep_datasets else "0",
             "HOURLY_RATE": str(args.hourly_rate or 0),
             "DATA_TIMEOUT": str(args.setup_timeout),
@@ -295,8 +306,12 @@ def build_spec(args, control_token: str, volume: dict | None, gpu_ids: list[str]
     if volume:
         spec["networkVolumeId"] = volume["id"]
         spec["volumeMountPath"] = VOLUME_MOUNT
+        # Documented restriction: network volumes attach to Secure Cloud pods
+        # only. Requesting one on community matches nothing, with an error that
+        # blames capacity.
+        spec["cloudType"] = "SECURE"
         if datacenter := volume.get("dataCenterId"):
-            # A network volume only attaches inside its own datacenter.
+            # And only inside the volume's own datacenter.
             spec["dataCenterIds"] = [datacenter]
     else:
         spec["volumeInGb"] = disk
@@ -507,6 +522,9 @@ def main() -> int:
                         help="delete the network volume once results are downloaded")
     parser.add_argument("--datacenter", help="force a datacenter id")
 
+    parser.add_argument("--build-sr", type=int, default=16000,
+                        help="sample rate for the built wavs; preprocessing only "
+                             "ever reads 16 kHz, so higher is wasted disk")
     parser.add_argument("--sources", default="yoda narration mana_hf",
                         help="corpora the pod downloads and builds, space separated")
     parser.add_argument("--keep-datasets", action="store_true",
@@ -539,6 +557,13 @@ def main() -> int:
 
     if args.cleanup:
         return cmd_cleanup()
+
+    # Checked before anything is rented: without it the pod boots, installs for
+    # two minutes, and only then fails on the first gated download.
+    if not os.environ.get("HF_TOKEN"):
+        log("HF_TOKEN is not set - the pod cannot download weights or corpora")
+        log(f"  add it to {credentials.ENV_PATH} (git-ignored), or export it")
+        return 1
 
     estimates = plan.rank(args.epochs, cloud=args.cloud)
     if args.plan:
@@ -587,6 +612,14 @@ def main() -> int:
         volume = None if args.no_volume else ensure_volume(
             args.volume_name, args.volume_gb, args.datacenter
         )
+        if volume and args.cloud != "SECURE":
+            log("a network volume forces SECURE cloud (RunPod restriction), "
+                "which costs roughly double")
+            log("  --no-volume keeps community pricing and rebuilds the corpus")
+            args.cloud = "SECURE"
+            estimates = plan.rank(args.epochs, cloud="SECURE")
+            if estimates:
+                args.hourly_rate = estimates[0]["price"]
         spec = build_spec(args, control_token, volume, gpu_ids)
         log(f"creating pod ({args.cloud}, sources: {args.sources})")
         log(f"  GPUs, in order: {', '.join(g.split()[-1] for g in gpu_ids)}")
@@ -596,14 +629,21 @@ def main() -> int:
         try:
             pod_info = api.create_pod(spec)
         except api.RunPodError as error:
-            if "no instances currently available" not in str(error):
+            message = str(error).lower()
+            unavailable = ("no instances currently available" in message
+                           or "could not find any pods" in message)
+            if not unavailable:
                 raise
             # A network volume pins the pod to one datacentre, so "nothing
             # available" usually means nothing available *there*, not nowhere.
-            log("no instances available for that request")
+            log("nothing available matching that request")
+            log(f"  asked for: {spec.get('containerDiskInGb')} GB disk, "
+                f"{args.cloud}, {len(gpu_ids)} GPU model(s)")
+            log("  a large container disk is the usual reason on community cloud")
             if volume:
                 log(f"  the volume pins this to {volume.get('dataCenterId')}; "
                     "options:")
+                log("    --container-disk 60    a smaller disk is far easier to place")
                 log("    --no-volume            any datacentre, nothing persisted")
                 log("    --cloud SECURE         same datacentre, roughly double the rate")
             else:

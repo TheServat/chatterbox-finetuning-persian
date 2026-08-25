@@ -89,6 +89,15 @@ print('bf16 native:', torch.cuda.get_device_capability(0)[0] >= 8)" \
 
 # --------------------------------------------------------------------------
 phase models
+step "link speed"
+# Community hosts are individually owned machines, so the connection is an
+# unknown until measured - and it decides whether rebuilding the corpus each
+# run is cheaper than renting persistent storage at Secure Cloud rates.
+LINK_START=$(date +%s)
+curl -s -o /dev/null -w "  %{speed_download} B/s downloading 100 MB
+"     --max-time 120 -r 0-104857599     "https://huggingface.co/ResembleAI/chatterbox/resolve/main/s3gen.safetensors"     || echo "  link test failed"
+echo "  (took $(( $(date +%s) - LINK_START ))s)"
+
 step "model weights"
 # Kept on the network volume when there is one, so a second run skips the
 # 2 GB download entirely.
