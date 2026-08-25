@@ -94,9 +94,16 @@ step "link speed"
 # unknown until measured - and it decides whether rebuilding the corpus each
 # run is cheaper than renting persistent storage at Secure Cloud rates.
 LINK_START=$(date +%s)
-curl -s -o /dev/null -w "  %{speed_download} B/s downloading 100 MB
-"     --max-time 120 -r 0-104857599     "https://huggingface.co/ResembleAI/chatterbox/resolve/main/s3gen.safetensors"     || echo "  link test failed"
-echo "  (took $(( $(date +%s) - LINK_START ))s)"
+LINK_URL="https://huggingface.co/ResembleAI/chatterbox/resolve/main/s3gen.safetensors"
+LINK_BPS=$(curl -s -o /dev/null -w '%{speed_download}' --max-time 120 \
+    -r 0-104857599 "$LINK_URL" 2>/dev/null || echo 0)
+echo "  ${LINK_BPS} B/s on a 100 MB fetch, in $(( $(date +%s) - LINK_START ))s"
+awk -v bps="$LINK_BPS" 'BEGIN {
+    mb = bps / 1048576
+    printf "  %.1f MB/s", mb
+    if (mb < 10) print " - slow for a datacentre; the corpus rebuild will drag"
+    else print " - fast enough to rebuild the corpus cheaply"
+}'
 
 step "model weights"
 # Kept on the network volume when there is one, so a second run skips the
