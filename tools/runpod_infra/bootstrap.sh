@@ -90,7 +90,28 @@ export PY
 
 step "python dependencies"
 cd "$REPO_DIR" || fail "repository missing at $REPO_DIR"
-"$PY" -m pip install --no-cache-dir -q -r requirements.txt || fail "pip install failed"
+
+# torch is deliberately excluded from what gets installed here. The image ships
+# a build matched to its own driver - cu128 for a CUDA 12.8 host - while
+# requirements.txt only says torch>=2.6.0, so pip happily fetched 2.13.0+cu130
+# and the first CUDA call died with "driver is too old". The image's torch is
+# the correct one; the job is to leave it alone.
+grep -viE '^(torch|torchaudio|torchvision)([=<>!~ ]|$)' requirements.txt     > /tmp/requirements-pod.txt
+
+if "$PY" -c "import torch" >/dev/null 2>&1; then
+    echo "using the image's torch; installing everything else"
+    "$PY" -m pip install --no-cache-dir -q -r /tmp/requirements-pod.txt         || fail "pip install failed"
+else
+    # Nothing preinstalled: match the wheel to the driver rather than taking
+    # whatever is newest, which is how the mismatch happened.
+    DRIVER_CUDA=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
+    CUDA_TAG=$(nvidia-smi | grep -oE 'CUDA Version: [0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    WHEEL_INDEX="https://download.pytorch.org/whl/cu$(echo "$CUDA_TAG" | tr -d '.')"
+    echo "no preinstalled torch; driver $DRIVER_CUDA reports CUDA $CUDA_TAG"
+    echo "  installing torch from $WHEEL_INDEX"
+    "$PY" -m pip install --no-cache-dir -q --index-url "$WHEEL_INDEX" torch torchaudio         || fail "installing a torch matching CUDA $CUDA_TAG failed"
+    "$PY" -m pip install --no-cache-dir -q -r /tmp/requirements-pod.txt         || fail "pip install failed"
+fi
 "$PY" -c "import torch, transformers, peft, soundfile, num2words; \
 print('torch', torch.__version__, 'cuda', torch.cuda.is_available()); \
 print('bf16 native:', torch.cuda.get_device_capability(0)[0] >= 8)" \
