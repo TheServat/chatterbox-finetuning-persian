@@ -278,7 +278,10 @@ def build_spec(args, control_token: str, volume: dict | None, gpu_ids: list[str]
         "gpuTypePriority": "custom",
         "containerDiskInGb": disk,
         "ports": [f"{CONTROL_PORT}/http"],
-        "dockerStartCmd": ["bash", "-lc", start],
+        # `bash -c`, not `-lc`: a login shell re-sources /etc/profile, which on
+        # some images rewrites PATH and LD_LIBRARY_PATH after the entrypoint has
+        # set them up for CUDA. The start command sets what it needs itself.
+        "dockerStartCmd": ["bash", "-c", start],
         "env": {
             "POD_ROOT": "/workspace",
             "PERSIST_DIR": VOLUME_MOUNT if volume else "/workspace/persist",

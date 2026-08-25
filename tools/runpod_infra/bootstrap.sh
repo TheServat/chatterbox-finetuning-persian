@@ -112,10 +112,39 @@ else
     "$PY" -m pip install --no-cache-dir -q --index-url "$WHEEL_INDEX" torch torchaudio         || fail "installing a torch matching CUDA $CUDA_TAG failed"
     "$PY" -m pip install --no-cache-dir -q -r /tmp/requirements-pod.txt         || fail "pip install failed"
 fi
-"$PY" -c "import torch, transformers, peft, soundfile, num2words; \
+"$PY" -c "import transformers, peft, soundfile, num2words; print('support libraries ok')" \
+    || fail "support libraries failed to import"
+
+step "waiting for CUDA"
+# nvidia-smi can answer while CUDA context creation still fails with "CUDA
+# unknown error": the driver is visible but the device nodes are not ready.
+# It clears within seconds, so it is worth waiting for rather than failing on -
+# the previous run died here two minutes into a pod that was about to be fine.
+echo "  devices: $(ls /dev/nvidia* 2>/dev/null | tr '\n' ' ')"
+echo "  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+
+CUDA_READY=0
+for attempt in $(seq 1 12); do
+    if "$PY" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+        CUDA_READY=1
+        echo "  ready after ${attempt} attempt(s)"
+        break
+    fi
+    sleep 10
+done
+
+if [ "$CUDA_READY" -ne 1 ]; then
+    echo "  still unavailable after two minutes; diagnostics:"
+    "$PY" -c "import torch; torch.cuda.init()" 2>&1 | tail -3
+    nvidia-smi 2>&1 | head -12
+    fail "torch cannot see the GPU (nvidia-smi answers, CUDA init does not)"
+fi
+
+"$PY" -c "import torch; \
 print('torch', torch.__version__, 'cuda', torch.cuda.is_available()); \
+print('device:', torch.cuda.get_device_name(0)); \
 print('bf16 native:', torch.cuda.get_device_capability(0)[0] >= 8)" \
-    || fail "dependency import failed"
+    || fail "GPU check failed"
 
 # --------------------------------------------------------------------------
 phase models
