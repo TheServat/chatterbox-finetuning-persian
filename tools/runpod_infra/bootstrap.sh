@@ -74,7 +74,9 @@ if [ -z "$PY" ]; then
     # Nothing has torch: fall back and let pip provide it. That works, at the
     # cost of a few minutes and a couple of GB.
     PY="$(command -v python3)"
-    echo "no preinstalled torch; installing into $PY"
+    echo "no preinstalled torch anywhere; installing into $PY"
+    echo "  pip on PATH: ${PIP_BIN:-none}"
+    [ -n "$PIP_BIN" ] && "$PIP_BIN" --version
 fi
 export PY
 "$PY" --version
