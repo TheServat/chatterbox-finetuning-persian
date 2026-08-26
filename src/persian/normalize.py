@@ -262,6 +262,33 @@ def normalize(
     return punc_norm_fa(text) if final_punctuation else text.strip()
 
 
+# Letters Persian spells differently but pronounces identically. Comparing a
+# spoken sentence against its text through an ASR transcript, these are the
+# difference between measuring pronunciation and measuring the transcriber's
+# choice of spelling: /s/ can be written three ways, /z/ four, and a model that
+# said the word correctly should not be marked wrong for it.
+_HOMOPHONES = str.maketrans({
+    "ص": "س", "ث": "س",
+    "ط": "ت",
+    "ذ": "ز", "ض": "ز", "ظ": "ز",
+    "ح": "ه",
+    "غ": "ق",
+})
+
+# Glottal marks, largely silent in ordinary Persian speech.
+_SILENT_IN_SPEECH = str.maketrans({"ع": "", "ء": "", "ئ": "ی", "أ": "ا", "إ": "ا"})
+
+
+def phonetic_fold(text: str) -> str:
+    """Reduce spelling to sound, for comparing speech against its text.
+
+    Alef and alef-madda are deliberately left apart: they are different vowel
+    lengths, not different spellings of one sound, and a model that says one
+    for the other has made a real mistake worth seeing.
+    """
+    return text.translate(_HOMOPHONES).translate(_SILENT_IN_SPEECH)
+
+
 def persian_ratio(text: str) -> float:
     """Share of letters that are Persian/Arabic script (0.0 - 1.0)."""
     fa = len(_PERSIAN_LETTERS.findall(text))
