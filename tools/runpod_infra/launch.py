@@ -74,7 +74,13 @@ VOLUME_MOUNT = "/workspace"
 DEFAULTS = {
     "pod_ready_timeout": 900,     # RUNNING, from creation
     "runtime_timeout": 360,       # container actually starting, from RUNNING
-    "server_timeout": 900,        # control server answering, once it has
+    # Measured: a healthy pod answered 132 s after creation, twice. A host whose
+    # driver is older than the image never answers at all - the container dies in
+    # its prestart hook with "unsatisfied condition: cuda>=12.8" while RunPod
+    # still reports the pod as started - and the only signal is this timeout.
+    # 900 s of that costs 18 cents before another host is tried; 420 keeps three
+    # times the margin a good pod needs.
+    "server_timeout": 420,        # control server answering, once it has
     "setup_timeout": 3600,        # through dependencies, weights and extraction
     "stall_timeout": 1200,        # no step progress once training has begun
     "poll_seconds": 20,
