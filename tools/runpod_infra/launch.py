@@ -323,6 +323,41 @@ def build_spec(args, control_token: str, volume: dict | None, gpu_ids: list[str]
     return spec
 
 
+def create_when_capacity(spec: dict, window: float, poll: float = 45.0) -> dict:
+    """Ask for the pod until one is free, or the window runs out.
+
+    Capacity moves on a scale of minutes. A sweep here found nothing on any of
+    eleven datacentres, and a request eight minutes later was placed at once
+    with the same specification - so a single refusal says what was true for
+    one second, not what is true for the run. A rejected request is free and
+    answers in about two seconds, which is what makes waiting cheaper than
+    giving up and being restarted by hand.
+
+    Anything that is not a capacity refusal is raised straight away: a bad
+    image or a malformed spec will not fix itself by being asked again.
+    """
+    deadline = time.time() + window
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return api.create_pod(spec)
+        except api.RunPodError as error:
+            message = str(error).lower()
+            if not ("no instances currently available" in message
+                    or "could not find any pods" in message):
+                raise
+            if time.time() >= deadline:
+                raise
+            if attempt == 1:
+                log(f"nothing free right now; retrying every {poll:.0f}s for "
+                    f"up to {window / 60:.0f} min (refusals are free)")
+            elif attempt % 8 == 0:
+                left = (deadline - time.time()) / 60
+                log(f"  still nothing after {attempt} tries, {left:.0f} min left")
+            time.sleep(poll)
+
+
 def wait_for(condition, timeout: float, poll: float, description: str):
     """Poll until `condition()` is truthy. Returns the value, or None on timeout."""
     deadline = time.time() + timeout
@@ -548,6 +583,9 @@ def main() -> int:
                         default=ROOT / "MyTTSDataset" / CACHE_NAME)
     parser.add_argument("--out", type=Path, default=ROOT / "runpod_results")
 
+    parser.add_argument("--wait-for-capacity", type=float, default=1800,
+                        help="seconds to keep asking when nothing is free; "
+                             "refused requests cost nothing")
     parser.add_argument("--max-hours", type=float, default=12.0)
     parser.add_argument("--max-cost", type=float, default=10.0)
     parser.add_argument("--poll-seconds", type=float, default=DEFAULTS["poll_seconds"])
@@ -656,7 +694,7 @@ def _attempt(args, estimates) -> int | None:
             log(f"  pinned to {volume.get('dataCenterId')} by the network volume")
 
         try:
-            pod_info = api.create_pod(spec)
+            pod_info = create_when_capacity(spec, args.wait_for_capacity)
         except api.RunPodError as error:
             message = str(error).lower()
             unavailable = ("no instances currently available" in message
@@ -679,7 +717,8 @@ def _attempt(args, estimates) -> int | None:
                 log("  options:")
                 log("    --cloud SECURE         more expensive but usually available")
                 log("    --gpu '<name>'         name a card explicitly")
-            log("  or wait: community capacity comes and goes within minutes")
+            log(f"  waited {args.wait_for_capacity / 60:.0f} min; "
+                "--wait-for-capacity takes a longer window")
             return 1
         pod_id = pod_info["id"]
         _ACTIVE_POD = pod_id
