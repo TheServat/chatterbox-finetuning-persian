@@ -136,33 +136,31 @@ def show_local() -> None:
 
 
 def contention(gpu: dict | None) -> str | None:
-    """Whether something other than training is sitting on the card.
+    """Whether the card is full, and how much of it is not this training.
 
-    Worth a line of its own because the failure is silent. When a 6 GB card
-    fills up, Windows pages VRAM to system RAM rather than raising: utilisation
-    still reads 91%, the loss still falls, and only the step time gives it away
-    - here 7.4 s/step became 30 when Ollama loaded a 7B model beside training.
-    Reading a step time as slow needs a baseline; reading "3.1 GB is not yours"
-    does not.
+    Worth a line because the failure is silent. When a 6 GB card fills up,
+    Windows pages VRAM to system RAM rather than raising: utilisation still
+    reads 91%, the loss still falls, and only the step time gives it away -
+    7.4 s/step became 30 here when an Ollama model loaded alongside.
 
-    mem_used_gb covers the whole card and reserved_gb covers this process, so
-    the gap is other processes plus our own CUDA context. The context alone is
-    a few hundred megabytes, hence a threshold rather than any gap at all.
+    Fullness is the trigger, not the gap. Some of the card is always outside
+    torch's pool - the CUDA context and the Windows desktop measured 1.05 GB
+    here with nothing else running - so warning on that alone fires every time
+    and teaches the reader to ignore it. Below 90% none of it matters; above,
+    both numbers are printed rather than attributed, because this cannot tell a
+    large context from a neighbour.
     """
     if not gpu or "reserved_gb" not in gpu:
         return None  # written by an older run, before this was recorded
 
     used = gpu.get("mem_used_gb", 0)
     total = gpu.get("mem_total_gb", 0)
-    elsewhere = used - gpu["reserved_gb"]
-
-    if elsewhere < 0.8 or not total:
+    if not total or used / total <= 0.90:
         return None
 
-    line = f"         {elsewhere:.1f} GB on this card is not training"
-    if used / total > 0.9:
-        line += f"  - card {used / total * 100:.0f}% full, expect slow steps"
-    return line
+    return (f"         card {used / total * 100:.0f}% full - "
+            f"torch {gpu['reserved_gb']:.1f} GB, "
+            f"other {used - gpu['reserved_gb']:.1f} GB; expect slow steps")
 
 
 def show_remote() -> None:

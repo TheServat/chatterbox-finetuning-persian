@@ -149,6 +149,13 @@ class InferenceCallback(TrainerCallback):
             getattr(t3, "tfmr", None), "config", None
         ) and t3.tfmr.config._attn_implementation
 
+        # Seeding makes one checkpoint comparable with the next, but the
+        # training stream must not notice, so its state is put back below.
+        rng_state = torch.get_rng_state()
+        cuda_rng_state = (
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        )
+
         # S3Gen and the voice encoder live on the CPU during training; they are
         # ~1 GB and are only needed for these few seconds.
         try:
@@ -157,6 +164,8 @@ class InferenceCallback(TrainerCallback):
             engine.s3gen.to(device).eval()
             engine.ve.to(device).eval()
             engine.device = device
+
+            torch.manual_seed(getattr(self.config, "inference_seed", 1234))
 
             with torch.no_grad():
                 wav = engine.generate(
@@ -187,6 +196,12 @@ class InferenceCallback(TrainerCallback):
             dropped = compat.drop_inference_cache(t3)
             if dropped:
                 logger.debug(f"dropped inference cache: {', '.join(dropped)}")
+
+            # Hand the training stream back exactly the randomness it had, so
+            # seeding the sample cannot shift the data order or the dropout.
+            torch.set_rng_state(rng_state)
+            if cuda_rng_state is not None:
+                torch.cuda.set_rng_state_all(cuda_rng_state)
 
             engine.s3gen.to("cpu")
             engine.ve.to("cpu")

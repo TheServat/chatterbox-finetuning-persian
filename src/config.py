@@ -53,6 +53,12 @@ class TrainConfig:
 
     is_inference: bool = False
     inference_prompt_path: str = "./speaker_reference/2.wav"
+    # Sampling is stochastic (do_sample=True, temperature 0.8), so without a
+    # fixed seed each checkpoint is a different draw and two samples cannot be
+    # compared. A word came out right at step 1000 and wrong at 1500 for want
+    # of this. The seed is applied around the sample only, and the training RNG
+    # is restored afterwards.
+    inference_seed: int = 1234
     inference_test_text: str = (
         "سلام، این یک آزمایش برای مدل گفتار فارسی است. "
         "امیدوارم صدای طبیعی و روان داشته باشد."
