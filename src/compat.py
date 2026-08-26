@@ -117,6 +117,52 @@ def _patch_is_multilingual() -> list[str]:
     return ["T3Config.is_multilingual (>= 2454)"]
 
 
+def _patch_alignment_repetition_guard() -> list[str]:
+    """Hold the analyzer's token-repetition rule until the text has been spoken.
+
+    AlignmentStreamAnalyzer forces an EOS the moment the last two speech tokens
+    match, and in chatterbox-tts 0.1.7 as published the guard on that test is
+    commented out:
+
+        token_repetition = (
+            # self.complete and
+            len(self.generated_tokens) >= 3 and
+            len(set(self.generated_tokens[-2:])) == 1
+        )
+
+    Its two siblings, long_tail and alignment_repetition, both keep theirs and
+    both measure from `completed_at`. Two identical tokens in a row are not a
+    stall - they are ordinary speech. Measured over 400 clips of this corpus,
+    85% contain the pattern, 3.05% of all token positions are one, and the first
+    lands a median of 31 tokens in: 1.2 s at 25 tokens a second. So generation
+    gets cut about a second after it starts, whatever the model has learned.
+    Both samples here fit that: 0.8 s at step 1250, and 6.2 s at step 1000 from
+    the lucky tail of the same distribution.
+
+    Rather than restage a ninety-line method that upstream may change, the token
+    history is cleared while the text is unfinished, keeping it under the three
+    entries the rule needs. This runs before the wrapped call, so it reads
+    `complete` as of the previous frame; that delays a real detection by a frame
+    or two and costs nothing, since the sibling rules cover a genuine stall.
+    """
+    from src.chatterbox_.models.t3.inference import alignment_stream_analyzer
+
+    analyzer = alignment_stream_analyzer.AlignmentStreamAnalyzer
+    if getattr(analyzer.step, "_repetition_needs_completion", False):
+        return []
+
+    original_step = analyzer.step
+
+    def step(self, logits, next_token=None, *args, **kwargs):
+        if not self.complete:
+            del self.generated_tokens[:]
+        return original_step(self, logits, next_token, *args, **kwargs)
+
+    step._repetition_needs_completion = True
+    analyzer.step = step
+    return ["AlignmentStreamAnalyzer.step (repetition waits for completion)"]
+
+
 def use_eager_attention(model) -> bool:
     """Switch a built transformer to eager attention.
 
@@ -136,6 +182,38 @@ def use_eager_attention(model) -> bool:
         return False
     setter("eager")
     return getattr(tfmr.config, "_attn_implementation", None) == "eager"
+
+
+def drop_inference_cache(module) -> list[str]:
+    """Remove the wrappers T3.inference caches, wherever they sit in the tree.
+
+    T3.inference builds a `patched_model` around the very layers the trainer
+    owns and leaves it on the T3 instance. From then on every weight appears in
+    the state dict twice under two names, and safetensors refuses to write
+    tensors that share storage - so the *next* checkpoint save dies, long after
+    the sample that caused it. Two runs ended exactly that way, the second at
+    step 1500 having sampled at 1250.
+
+    Walking the tree is the point. Under LoRA the caller holds a PeftModel and
+    the cache sits on the T3 wrapped inside it, at
+    `base_model.model.patched_model`. PEFT forwards attribute *reads* to the
+    model it wraps but not deletes, so `delattr(peft_model, "patched_model")`
+    raises, and setting the name on the wrapper instead leaves the real cache
+    untouched - which is how the first attempt at this failed silently.
+
+    Returns what it removed, so a caller can log it.
+    """
+    removed = []
+    for owner in list(module.modules()):
+        for name in ("patched_model", "compiled"):
+            if name in owner._modules:
+                del owner._modules[name]
+            elif name in owner.__dict__:
+                del owner.__dict__[name]
+            else:
+                continue
+            removed.append(f"{type(owner).__name__}.{name}")
+    return removed
 
 
 def _silence_progress_bars() -> list[str]:
@@ -193,6 +271,7 @@ def apply(quiet: bool = True, verbose: bool = False) -> list[str]:
         _patch_t3_training_hooks()
         + _patch_voice_encoder_dtype()
         + _patch_is_multilingual()
+        + _patch_alignment_repetition_guard()
     )
     if quiet:
         applied += _silence_progress_bars()

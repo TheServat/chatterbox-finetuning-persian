@@ -47,6 +47,20 @@ class InferenceCallback(TrainerCallback):
             self.skip_inference = False
             logger.info(f"Inference Callback is ready. Examples will be saved here: {self.inference_dir}")
 
+    def on_step_end(self, args, state, control, **kwargs):
+        """Last hook before a checkpoint is written.
+
+        transformers saves and *then* calls on_save, so a cache left by the
+        previous sample is still attached when the next save serialises the
+        model. Clearing it here closes that window even if a sample failed
+        part-way through its own cleanup.
+        """
+        if control.should_save and self.engine is not None:
+            from src import compat
+
+            compat.drop_inference_cache(self.engine.t3)
+        return control
+
     def on_save(self, args, state, control, **kwargs):
 
         if self.skip_inference:
@@ -165,18 +179,14 @@ class InferenceCallback(TrainerCallback):
             )
 
         finally:
-            # T3.inference caches a `patched_model` that wraps the same layers
-            # the trainer owns, so afterwards the state dict contains every
-            # weight twice under two names. safetensors refuses to write shared
-            # tensors, so the *next* checkpoint save dies - and takes the run
-            # with it, an hour after the sample that caused it. Dropping the
-            # cache here costs one rebuild per sample and nothing else.
-            for attribute in ("patched_model", "compiled"):
-                if hasattr(t3, attribute):
-                    try:
-                        delattr(t3, attribute)
-                    except Exception:
-                        setattr(t3, attribute, None if attribute == "patched_model" else False)
+            # T3.inference caches a `patched_model` wrapping the same layers the
+            # trainer owns, which makes the next checkpoint save fail on shared
+            # tensors. compat walks the module tree to find it: `t3` here is a
+            # PeftModel and the cache lives on the T3 inside it, so deleting the
+            # name off this object does nothing. Costs one rebuild per sample.
+            dropped = compat.drop_inference_cache(t3)
+            if dropped:
+                logger.debug(f"dropped inference cache: {', '.join(dropped)}")
 
             engine.s3gen.to("cpu")
             engine.ve.to("cpu")
