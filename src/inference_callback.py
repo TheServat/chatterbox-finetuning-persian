@@ -71,12 +71,17 @@ class InferenceCallback(TrainerCallback):
 
         # Frequent saves are what survives a power cut; frequent samples are
         # what makes them expensive. Only every nth save draws audio.
+        #
+        # Counted off the global step rather than off saves seen, because a
+        # counter starts again with the process: after a restart the audio
+        # landed on step 2000 where 2100 had been predicted, and which step it
+        # falls on should not depend on when the machine last went down.
         every = max(1, getattr(self.config, "inference_every_n_saves", 1))
-        self._saves_seen = getattr(self, "_saves_seen", 0) + 1
-        if self._saves_seen % every:
+        interval = every * max(1, state.save_steps or 1)
+        if step % interval:
             logger.info(
-                f"checkpoint-{step} saved; next audio in "
-                f"{every - self._saves_seen % every} more save(s)"
+                f"checkpoint-{step} saved; next audio at step "
+                f"{(step // interval + 1) * interval:,}"
             )
             return
 
