@@ -91,13 +91,21 @@ def human_age(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h ago"
 
 
-def newest(pattern: str) -> Path | None:
-    """The most recently written file matching a glob, or None.
+def newest(*patterns: str) -> Path | None:
+    """The most recently written file matching any of these globs, or None.
+
+    Several patterns because the log name depends on how training was started -
+    by hand, or under tools/keep_training.py - and a monitor that only knows one
+    of them reports "not running" while the run is stepping.
 
     A timestamp in the future is a clock artifact rather than a fresher file,
     so those are set aside unless nothing else matches.
     """
-    matches = sorted(ROOT.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+    matches = sorted(
+        (path for pattern in patterns for path in ROOT.glob(pattern)),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     if not matches:
         return None
     cutoff = time.time() + FUTURE_TOLERANCE
@@ -113,7 +121,7 @@ def bar(fraction: float, width: int = 24) -> str:
 # --------------------------------------------------------------------------
 
 def show_local() -> None:
-    log = newest("local_train*.log")
+    log = newest("local_train*.log", "supervised_train*.log")
     status = read_json(STATUS_PATH)
     log_age = age(log) if log else float("inf")
     live = log_age < LIVE_SECONDS
