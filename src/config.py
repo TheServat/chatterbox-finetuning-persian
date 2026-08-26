@@ -65,6 +65,12 @@ class TrainConfig:
     # difference between checkpoints 250 steps apart, so a single draw was
     # being read as the model getting better or worse when it was the dice.
     inference_draws: int = 3
+    # Saving is cheap insurance against losing work; sampling is not. Mains
+    # power here fails often enough that a 250-step save interval was costing
+    # up to half an hour per cut, so saves go every 100 steps and audio is
+    # drawn every third one - the loss window shrinks without paying three
+    # generations more often.
+    inference_every_n_saves: int = 3
     inference_test_text: str = (
         "سلام، این یک آزمایش برای مدل گفتار فارسی است. "
         "امیدوارم صدای طبیعی و روان داشته باشد."

@@ -68,6 +68,18 @@ class InferenceCallback(TrainerCallback):
             return
 
         step = state.global_step
+
+        # Frequent saves are what survives a power cut; frequent samples are
+        # what makes them expensive. Only every nth save draws audio.
+        every = max(1, getattr(self.config, "inference_every_n_saves", 1))
+        self._saves_seen = getattr(self, "_saves_seen", 0) + 1
+        if self._saves_seen % every:
+            logger.info(
+                f"checkpoint-{step} saved; next audio in "
+                f"{every - self._saves_seen % every} more save(s)"
+            )
+            return
+
         checkpoint_dir = os.path.join(args.output_dir, f"checkpoint-{step}")
         is_lora = getattr(self.config, "is_lora", False)
 
