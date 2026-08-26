@@ -75,8 +75,15 @@ def probe(datacenter: str, gpu_ids: list[str], cloud: str,
         return True, f"{created.get('costPerHr', 0):.2f}/h"
     except api.RunPodError as error:
         message = str(error)
-        if "no instances currently available" in message:
+        # Both of these mean the same thing - nothing free to give - but the
+        # second arrives as an HTTP 500, which read as a server fault until the
+        # body was looked at. Reporting it as an error made a whole sweep of
+        # datacentres look broken when they were merely full.
+        if ("no instances currently available" in message
+                or "could not find any pods with required specifications" in message):
             return False, "no capacity"
+        if "dataCenterIds/items/enum" in message:
+            return False, "not a pod datacentre"
         return False, message.split(":")[-1].strip()[:60]
     finally:
         if pod_id:
@@ -122,6 +129,14 @@ def main() -> int:
         volume_id = found_volume["id"]
     centres = api.datacenters(storage_only=not args.all_datacenters)
     names = [d["id"] for d in centres]
+    # GraphQL knows regions the pod endpoint will not accept; asking about
+    # those wastes the sweep on schema errors instead of on capacity.
+    if accepted := api.pod_datacenters():
+        skipped = [n for n in names if n not in accepted]
+        names = [n for n in names if n in accepted]
+        if skipped:
+            print(f"({len(skipped)} region(s) cannot host pods via this API: "
+                  f"{', '.join(skipped)})")
     if args.datacenter:
         names = [args.datacenter]
 

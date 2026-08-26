@@ -161,6 +161,44 @@ query {
 """
 
 
+_POD_DATACENTERS: list[str] | None = None
+
+
+def pod_datacenters() -> list[str]:
+    """The datacentre ids `create_pod` will actually accept.
+
+    GraphQL lists more of them than the REST pod endpoint takes, so probing
+    straight from that list spends most of its attempts on ids the schema
+    rejects - which reads as a fault rather than as the wrong question. The
+    accepted set is in the OpenAPI enum, and the quickest way to it is to send
+    one deliberately invalid id and read the enum out of the 400. That keeps
+    working when RunPod adds a region, which a hardcoded list would not.
+    """
+    global _POD_DATACENTERS
+    if _POD_DATACENTERS is not None:
+        return _POD_DATACENTERS
+
+    import re
+
+    try:
+        create_pod({
+            "name": "enum-probe",
+            "imageName": "runpod/pytorch:1.1.0-cu1281-torch280-ubuntu2204",
+            "cloudType": "SECURE", "computeType": "GPU", "gpuCount": 1,
+            "gpuTypeIds": ["NVIDIA RTX A5000"], "containerDiskInGb": 10,
+            "dataCenterIds": ["__ASK__"],
+            "dockerStartCmd": ["bash", "-lc", "true"],
+        })
+    except Exception as error:
+        found = re.search(r"dataCenterIds/items/enum[^']*((?:'[A-Z0-9-]+',?\s*)+)", str(error))
+        if found:
+            _POD_DATACENTERS = re.findall(r"'([A-Z0-9-]+)'", found.group(1))
+            return _POD_DATACENTERS
+
+    _POD_DATACENTERS = []          # unknown: caller should not filter
+    return _POD_DATACENTERS
+
+
 def datacenters(storage_only: bool = False) -> list[dict]:
     entries = graphql(DATACENTER_QUERY).get("dataCenters", []) or []
     if storage_only:
