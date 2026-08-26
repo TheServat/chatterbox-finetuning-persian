@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -81,6 +82,40 @@ def say(message: str) -> None:
     print(f"[{datetime.now():%H:%M:%S}] {message}", flush=True)
 
 
+def quarantine_damaged(output_dir: Path) -> int:
+    """Move aside any checkpoint a power cut left half-written.
+
+    A checkpoint can come back the right size with a region never flushed -
+    zeros where weights should be. Training resumes from it without complaint
+    and learns nothing, because under LoRA the base weights are frozen and a
+    zeroed one is copied forward for ever. That is what happened at step 1800:
+    layers 7 to 9 came back empty and three hundred and fifty steps ran against
+    a model answering uniformly.
+
+    Only the newest is checked, then the next if that one is bad, because
+    reading a 2.25 GB file is not free and corruption lands on whatever was
+    being written when the power went.
+    """
+    sys.path.insert(0, str(ROOT))
+    from tools.verify_checkpoint import checkpoints, describe, inspect, is_good
+
+    moved = 0
+    for path in reversed(checkpoints(output_dir)):
+        report = inspect(path)
+        if is_good(report):
+            return moved
+        say(f"{path.name} is damaged: {describe(report)}")
+        destination = output_dir / "corrupt"
+        destination.mkdir(exist_ok=True)
+        target = destination / path.name
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.move(str(path), str(target))
+        moved += 1
+        say(f"moved {path.name} out of the way")
+    return moved
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.split("\n")[0],
@@ -97,6 +132,8 @@ def main() -> int:
         train_args.append("--resume")
 
     say(f"train.py {' '.join(train_args)}")
+    if quarantine_damaged(output_dir):
+        say("resuming from the newest checkpoint that survived")
     if state := progress(output_dir):
         say(f"resuming from step {state[0]:,}"
             + (f" of {state[1]:,}" if state[1] else ""))
@@ -115,6 +152,7 @@ def main() -> int:
                 cwd=str(ROOT),
             )
         ran_for = time.time() - started
+        quarantine_damaged(output_dir)
         state = progress(output_dir)
         reached = f", reached step {state[0]:,}" if state else ""
 
