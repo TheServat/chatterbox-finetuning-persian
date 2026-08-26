@@ -98,6 +98,13 @@ cd "$REPO_DIR" || fail "repository missing at $REPO_DIR"
 # the correct one; the job is to leave it alone.
 grep -viE '^(torch|torchaudio|torchvision)([=<>!~ ]|$)' requirements.txt     > /tmp/requirements-pod.txt
 
+# The image carries Ubuntu's python3-pkg-resources, which predates Python 3.12
+# and still reaches for pkgutil.ImpImporter - removed in 3.12. Nothing here
+# imports pkg_resources directly, but `perth` does, so the first import of
+# chatterbox died with AttributeError after twelve minutes of building a
+# corpus. pip's own setuptools shadows the system one and knows better.
+"$PY" -m pip install --no-cache-dir -q -U 'setuptools>=70' 	|| fail "could not update setuptools"
+
 if "$PY" -c "import torch" >/dev/null 2>&1; then
     echo "using the image's torch; installing everything else"
     "$PY" -m pip install --no-cache-dir -q -r /tmp/requirements-pod.txt         || fail "pip install failed"
