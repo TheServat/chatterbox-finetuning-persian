@@ -9,6 +9,7 @@ from src.chatterbox_.tts_turbo import ChatterboxTurboTTS
 from src.chatterbox_.models.t3.t3 import T3
 from src.model import resize_and_load_t3_weights
 from src.utils import (
+    noise_floor,
     normalise_peak,
     setup_logger,
     trim_onset_artifact,
@@ -165,26 +166,48 @@ class InferenceCallback(TrainerCallback):
             engine.ve.to(device).eval()
             engine.device = device
 
-            torch.manual_seed(getattr(self.config, "inference_seed", 1234))
+            base_seed = getattr(self.config, "inference_seed", 1234)
+            draws = max(1, getattr(self.config, "inference_draws", 3))
+            stem, extension = os.path.splitext(output_path)
+            floors = []
 
-            with torch.no_grad():
-                wav = engine.generate(
-                    self.config.inference_test_text,
-                    language_id=self.config.language_id,
-                    audio_prompt_path=self.config.inference_prompt_path,
-                    temperature=0.8,
-                    cfg_weight=0.5,
-                    exaggeration=0.5,
-                    repetition_penalty=1.2,
+            for draw in range(draws):
+                torch.manual_seed(base_seed + draw)
+
+                with torch.no_grad():
+                    wav = engine.generate(
+                        self.config.inference_test_text,
+                        language_id=self.config.language_id,
+                        audio_prompt_path=self.config.inference_prompt_path,
+                        temperature=0.8,
+                        cfg_weight=0.5,
+                        exaggeration=0.5,
+                        repetition_penalty=1.2,
+                    )
+
+                audio = wav.squeeze().cpu().numpy()
+                # Same treatment the real inference path applies, so a training
+                # sample sounds like what the model will actually produce.
+                audio = normalise_peak(trim_onset_artifact(audio, engine.sr))
+                path = output_path if draw == 0 else f"{stem}_{draw + 1}{extension}"
+                sf.write(path, audio, engine.sr)
+                floors.append(noise_floor(audio, engine.sr))
+                logger.info(
+                    f"Sample saved: {path} ({len(audio) / engine.sr:.1f} s, "
+                    f"floor {floors[-1]:.5f})"
                 )
 
-            audio = wav.squeeze().cpu().numpy()
-            # Same treatment the real inference path applies, so a training
-            # sample sounds like what the model will actually produce.
-            audio = normalise_peak(trim_onset_artifact(audio, engine.sr))
-            sf.write(output_path, audio, engine.sr)
+                # The cache is rebuilt per generation; dropping it between draws
+                # keeps only one copy of the layers alive at a time.
+                compat.drop_inference_cache(t3)
+
+            # The median is what to read across checkpoints; a single draw is
+            # too noisy to compare, and the median of three is not.
+            floors.sort()
             logger.info(
-                f"Sample saved: {output_path} ({len(audio) / engine.sr:.1f} s)"
+                f"checkpoint-{os.path.basename(stem).split('-')[-1]}: "
+                f"noise floor median {floors[len(floors) // 2]:.5f} "
+                f"over {len(floors)} draw(s), range {floors[0]:.5f}-{floors[-1]:.5f}"
             )
 
         finally:

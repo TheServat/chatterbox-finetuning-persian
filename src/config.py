@@ -59,6 +59,12 @@ class TrainConfig:
     # of this. The seed is applied around the sample only, and the training RNG
     # is restored afterwards.
     inference_seed: int = 1234
+    # One sample per checkpoint cannot show progress. Measured at a fixed
+    # checkpoint with only the seed varying, the noise floor spanned 3.5x
+    # (0.00174 to 0.00603) and the length 5.6 to 6.7 s - wider than the
+    # difference between checkpoints 250 steps apart, so a single draw was
+    # being read as the model getting better or worse when it was the dice.
+    inference_draws: int = 3
     inference_test_text: str = (
         "سلام، این یک آزمایش برای مدل گفتار فارسی است. "
         "امیدوارم صدای طبیعی و روان داشته باشد."

@@ -108,6 +108,27 @@ def trim_onset_artifact(
     return trimmed
 
 
+def noise_floor(audio: np.ndarray, sample_rate: int) -> float:
+    """RMS of the quietest frames, as a stand-in for how noisy a clip sounds.
+
+    The 5th percentile of 10 ms frame energies: quiet enough to be between
+    words, so it measures what is left when nobody is speaking. The reference
+    voice sits at 0.00055 and generated samples at 0.0017 to 0.0060, which is
+    the hiss a listener reports.
+
+    One reading means little - at a fixed checkpoint this spanned 3.5x on the
+    seed alone - so compare medians over several draws, never single clips.
+    """
+    if audio.size == 0:
+        return 0.0
+    frame = max(1, int(0.01 * sample_rate))
+    usable = audio[: len(audio) // frame * frame]
+    if usable.size < frame:
+        return 0.0
+    energies = np.sqrt((usable.reshape(-1, frame) ** 2).mean(axis=1))
+    return float(np.percentile(energies, 5))
+
+
 def normalise_peak(audio: np.ndarray, target: float = 0.95) -> np.ndarray:
     """Scale to a fixed peak, so nothing clips and levels match between clips."""
     peak = float(np.abs(audio).max()) if audio.size else 0.0
