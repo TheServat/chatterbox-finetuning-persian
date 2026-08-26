@@ -66,9 +66,17 @@ def last_match(pattern: re.Pattern, text: str):
     return found
 
 
+# A clock that steps backwards - a reboot, an NTP correction - leaves logs
+# stamped in the future. They win "newest" for as long as the skew lasts and
+# their age reads negative, so this points at a run that ended hours ago while
+# training steps normally beside it. That happened here: 20 minutes of skew
+# after a restart, and the monitor called a live run dead.
+FUTURE_TOLERANCE = 60
+
+
 def age(path: Path) -> float:
     try:
-        return time.time() - path.stat().st_mtime
+        return max(0.0, time.time() - path.stat().st_mtime)
     except Exception:
         return float("inf")
 
@@ -84,9 +92,17 @@ def human_age(seconds: float) -> str:
 
 
 def newest(pattern: str) -> Path | None:
-    """The most recently written file matching a glob, or None."""
+    """The most recently written file matching a glob, or None.
+
+    A timestamp in the future is a clock artifact rather than a fresher file,
+    so those are set aside unless nothing else matches.
+    """
     matches = sorted(ROOT.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
-    return matches[0] if matches else None
+    if not matches:
+        return None
+    cutoff = time.time() + FUTURE_TOLERANCE
+    plausible = [p for p in matches if p.stat().st_mtime <= cutoff]
+    return plausible[0] if plausible else matches[0]
 
 
 def bar(fraction: float, width: int = 24) -> str:
