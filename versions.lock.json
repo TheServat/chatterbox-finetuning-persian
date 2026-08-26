@@ -138,6 +138,16 @@
       "note": "Already local: train_metadata.csv (id|text) + train/audio/*.wav at 22.05 kHz.",
       "sr": 22050,
       "clips": 3043
+    },
+    "Thomcles/Persian-Farsi-Speech": {
+      "type": "hf_parquet",
+      "local_dir": "dataset/persian/Persian-Farsi-Speech",
+      "hours": null,
+      "clips": 109401,
+      "sr": 16000,
+      "license": "unverified",
+      "quality_field": "mos_ovr",
+      "note": "ASR-chunked speech with DNSMOS scores, 45 GB of parquet. Measured against YodaLingua: median mos_ovr 3.51 against 3.38, and its 90th percentile beats Yoda's maximum - so the 'noisier YouTube corpus' assumption was wrong. Filtered at 3.6, every clip kept is better than 90% of the primary corpus, which is what makes it worth adding."
     }
   }
 }

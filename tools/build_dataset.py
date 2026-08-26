@@ -294,9 +294,17 @@ SOURCES = {
         "reader": read_youtube,
         "dir": "dataset/persian/Persian-Farsi-Speech",
         "default": False,
-        "min_quality": 3.2,
-        "note": "Persian-Farsi-Speech. 16 kHz and ASR-derived, so noisier; "
-                "off by default, and worth a high --min-quality when used.",
+        # Measured rather than assumed: median mos_ovr 3.51 against YodaLingua's
+        # 3.38, and a 90th percentile of 4.08 against Yoda's *maximum* of 3.71.
+        # The corpus arrives pre-filtered at 3.0, so "ASR-derived, therefore
+        # noisier" was wrong. 3.6 is the point above Yoda's 90th percentile:
+        # every clip kept is cleaner than nine tenths of the primary corpus.
+        # Set here rather than through --min-quality, which applies to every
+        # source at once and would have cut most of Yoda along with it.
+        "min_quality": 3.6,
+        "note": "Persian-Farsi-Speech. 16 kHz, ASR-chunked, no speaker labels - "
+                "which costs nothing here, since the speaker embedding is "
+                "computed per clip from its own audio.",
     },
 }
 
