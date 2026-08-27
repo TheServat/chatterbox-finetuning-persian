@@ -114,6 +114,23 @@ def checkpoints() -> list[tuple[str, Path, float | None]]:
     return out
 
 
+TAGS = {
+    "Sounds": ["laughter", "giggle", "guffaw", "sigh", "gasp", "groan", "cry",
+               "whisper", "mumble", "cough", "sneeze", "sniff", "snore",
+               "clear_throat", "inhale", "exhale", "kiss", "shhh"],
+    "Hesitation": ["UH", "UM"],
+    "Other": ["singing", "humming", "whistle", "music"],
+    "Switch language": ["fa", "en", "ar", "tr", "fr", "de", "es", "it", "ru"],
+}
+
+TAG_NOTE = (
+    "These are real tokens - `[laughter]` is token 607, not ten letters - and "
+    "the multilingual base was trained with them. This Persian finetune was "
+    "not: all 95,802 clips in its corpus contain zero tags. So they may carry "
+    "over from the base or may not, and the only way to find out is to try one."
+)
+
+
 def training_is_running() -> bool:
     """Whether a trainer owns the card right now.
 
@@ -304,14 +321,28 @@ def build(voice: Voice, device_note: str):
                 )
                 speak = gr.Button("Speak", variant="primary")
 
+                with gr.Accordion("Tags — untested in Persian, see note",
+                                  open=False):
+                    gr.Markdown(TAG_NOTE)
+                    tag_buttons = []
+                    for group, names in TAGS.items():
+                        gr.Markdown(f"**{group}**")
+                        for row_start in range(0, len(names), 6):
+                            with gr.Row():
+                                for name in names[row_start:row_start + 6]:
+                                    button = gr.Button(f"[{name}]", size="sm")
+                                    tag_buttons.append((button, f"[{name}]"))
+
             with gr.Column(scale=2):
                 gr.Markdown("**Generation**")
                 temperature = gr.Slider(0.1, 1.5, value=0.8, step=0.05,
                                         label="Temperature — higher wanders more")
                 cfg_weight = gr.Slider(0.0, 1.0, value=0.5, step=0.05,
                                        label="CFG weight — how hard it follows the text")
-                exaggeration = gr.Slider(0.0, 1.0, value=0.5, step=0.05,
-                                         label="Exaggeration — emotional intensity")
+                exaggeration = gr.Slider(
+                    0.0, 1.0, value=0.5, step=0.05,
+                    label="Exaggeration — the emotion_adv conditioning, "
+                          "trained; 0.5 is neutral")
                 repetition_penalty = gr.Slider(1.0, 2.0, value=1.2, step=0.05,
                                                label="Repetition penalty")
                 with gr.Accordion("Sampling and long text", open=False):
@@ -356,6 +387,14 @@ def build(voice: Voice, device_note: str):
                 else:
                     updates.append(gr.update(visible=False))
             return [*updates, normalised, note, ""]
+
+        def append_tag(tag, current):
+            spaced = (current or "").rstrip()
+            return (spaced + " " + tag + " ") if spaced else (tag + " ")
+
+        for button, tag in tag_buttons:
+            button.click(lambda current, t=tag: append_tag(t, current),
+                         [text], [text])
 
         checkpoint.change(on_checkpoint, [checkpoint], [status])
         speak.click(
