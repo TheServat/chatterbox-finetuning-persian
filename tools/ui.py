@@ -155,6 +155,35 @@ FEATURE_NOTE = (
 )
 
 
+# Emotion here is not a tag but three dials, in rising order of how much they
+# actually move the result.
+#
+# exaggeration feeds emotion_adv in the conditioning encoder and is the one
+# emotional control that was trained; the model card calls 0.5 neutral and
+# 0.7+ more expressive. cfg_weight sets how hard the model holds to the text,
+# and the card suggests ~0.3 for dramatic or fast delivery. Neither is close to
+# the third: the reference clip. This model clones zero-shot, so the tone,
+# pace and mood of the voice it is given carry straight into the output - a
+# reference recorded cheerfully sounds cheerful. That is the real emotion
+# control, and it is the one nobody thinks to reach for.
+PRESETS = {
+    "Neutral": (0.5, 0.5),
+    "Expressive": (0.7, 0.4),
+    "Dramatic": (0.9, 0.3),
+    "Calm, measured": (0.4, 0.6),
+    "Fast delivery": (0.5, 0.3),
+}
+
+EMOTION_NOTE = (
+    "Emotion is not a tag on this model - it is these two dials and, more than "
+    "either, the reference clip. Cloning is zero-shot, so the mood of the voice "
+    "you give it carries into the output: record the reference the way you want "
+    "the result to sound and it will follow, further than any slider here.\n\n"
+    "`exaggeration` is the trained one, feeding emotion_adv in the conditioning "
+    "encoder. `cfg_weight` decides how tightly the text is held to."
+)
+
+
 def training_is_running() -> bool:
     """Whether a trainer owns the card right now.
 
@@ -353,6 +382,12 @@ def build(voice: Voice, device_note: str):
                           "come from the multilingual base",
                 )
 
+                gr.Markdown("**Tone** — presets move the two dials below")
+                with gr.Row():
+                    preset_buttons = [(gr.Button(name, size="sm"), name)
+                                      for name in PRESETS]
+                gr.Markdown(EMOTION_NOTE)
+
                 with gr.Accordion("What this model can and cannot do",
                                   open=False):
                     gr.Markdown(FEATURE_NOTE)
@@ -417,6 +452,13 @@ def build(voice: Voice, device_note: str):
                 else:
                     updates.append(gr.update(visible=False))
             return [*updates, normalised, note, ""]
+
+        for button, name in preset_buttons:
+            exaggeration_value, cfg_value = PRESETS[name]
+            button.click(
+                lambda e=exaggeration_value, c=cfg_value: (e, c),
+                None, [exaggeration, cfg_weight],
+            )
 
         checkpoint.change(on_checkpoint, [checkpoint], [status])
         speak.click(
