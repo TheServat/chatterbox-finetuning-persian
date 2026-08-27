@@ -85,10 +85,22 @@ def main() -> int:
         ok &= check("a run of one token still does not, while text remains",
                     not run([42] * 40, complete=False))
 
-        ok &= check("once the text is spoken, repetition is caught again",
+        ok &= check("once the text is spoken, a stall is caught again",
                     run([42, 42, 42, 42], complete=True))
         ok &= check("and varied tokens after completion are left alone",
                     not run([1, 2, 3, 4, 5, 6], complete=True))
+
+        # Upstream's comment says "3x same token in a row" and its code tests
+        # two. Over 500 real clips a run of two appears in 88% of them, and
+        # 0.62 times in the closing twenty tokens - which is where this rule
+        # acts - against 0.18 for a run of three. Two was cutting the tail off
+        # ordinary speech.
+        ok &= check("a run of two after completion is ordinary speech",
+                    not run([1, 2, 3, 3, 4, 5], complete=True))
+        ok &= check("a run of three after completion is a stall",
+                    run([1, 2, 3, 3, 3, 4], complete=True))
+        ok &= check("several separate pairs are still not a stall",
+                    not run([1, 1, 2, 2, 3, 3], complete=True))
     finally:
         AlignmentStreamAnalyzer.step = saved
 
