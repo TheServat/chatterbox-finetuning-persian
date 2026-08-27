@@ -67,17 +67,26 @@ _LETTER_FOLD_TABLE = str.maketrans(_LETTER_FOLD)
 _EZAFE_HEH = re.compile("ۀ|هٔ")
 _EZAFE_REPLACEMENT = "ه" + ZWNJ + "ی"
 
-# Optional short vowels only. Corpora diacritise inconsistently, so keeping
-# these would split one word across several token sequences.
+# Only what carries no sound: tatweel, which stretches a joining stroke, and
+# the Quranic annotation marks, which are not Persian phonemes.
 #
-# Deliberately NOT stripped:
-#   U+064B FATHATAN - not optional in Persian. It carries the whole adverbial
-#                     "-an" ending (lotfan, meslan, taqriban); removing it
-#                     turns lotfan into lotfa.
-#   U+0653 MADDAH   - the madda of A. NFKC normally composes it away, but a
-#                     decomposed input would otherwise become a bare alef.
-#   U+0654 / U+0655 HAMZA ABOVE / BELOW - lexical hamza.
-_HARAKAT = re.compile("[ٌ-ْٖ-ٰٟ٘ـ]")
+# The short vowels, shadda and sukun (U+064C-U+0652) were stripped here at
+# first, on the reasoning that Persian writes them as decoration and this
+# corpus carries none. That holds for scraped text and fails at the other
+# end. Every one of them is in the tokenizer's vocabulary, and someone who
+# types the marks is not decorating - they are supplying the short vowels and
+# the gemination the script leaves out, which is the only way to tell one
+# reading of a word from another. Stripping them made all three spellings of
+# a name arrive at the model as the same sixteen tokens, so the marks could
+# not do anything at all.
+#
+# A corpus that diacritised *inconsistently* would want them removed while it
+# is built - a different decision, made in a different place.
+#
+# Also kept: U+064B FATHATAN, which carries the adverbial -an ending (lotfan,
+# not lotfa); U+0653 MADDAH, since a decomposed input would otherwise lose the
+# madda of alef; U+0654/U+0655 hamza; and U+0670, a long /a/ in some spellings.
+_HARAKAT = re.compile("[ـٖ-ٟ٘]")
 
 _PUNCT_MAP = {
     "…": "،",   # ... -> Persian comma

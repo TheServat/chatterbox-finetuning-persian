@@ -50,11 +50,22 @@ MUST_SURVIVE_MARKS = {
     "\u0653": "maddah - the madda of alef-madda",
 }
 
-# Optional short vowels: dropped on purpose, for consistency across corpora.
-MUST_BE_STRIPPED_MARKS = {
+# Marks that carry sound. These were stripped at first, on the reasoning that
+# Persian writes them only as decoration. Stripping them meant a reader who
+# typed them reached the model with exactly the tokens of one who did not, so
+# the marks could disambiguate nothing - \u0633\u064E\u062C\u0651\u0627\u062F and \u0633\u062C\u0627\u062F were the same sixteen
+# tokens. Each of these is in the tokenizer's vocabulary.
+MUST_SURVIVE_MARKS = {
     "\u064E": "fatha", "\u064F": "damma", "\u0650": "kasra",
-    "\u0651": "shadda", "\u0652": "sukun", "\u0670": "superscript alef",
+    "\u0651": "shadda - gemination, audible", "\u0652": "sukun",
+    "\u0670": "superscript alef",
+}
+
+# Carries no sound: a stretched joining stroke, and Quranic annotation.
+MUST_BE_STRIPPED_MARKS = {
     "\u0640": "tatweel",
+    "\u0656": "subscript alef",
+    "\u065F": "wavy hamza below",
 }
 
 DIGIT_SETS = {
@@ -166,7 +177,16 @@ def audit(verbose: bool = True) -> list[str]:
         if ch == "\u064B" and ch not in out:
             failures.append(f"tanwin U+064B was stripped: {out!r}")
 
-    print("\n[5] Marks that must be stripped")
+    print("\n[5] Marks that carry sound and must survive")
+    for ch, why in MUST_SURVIVE_MARKS.items():
+        out = normalize(f"با{ch}با", final_punctuation=False)
+        status = "ok  " if ch in out else "FAIL"
+        if ch not in out:
+            failures.append(f"{why} U+{ord(ch):04X} was stripped: {out!r}")
+        if verbose:
+            print(f"  {status} {why:30s} -> {out!r}")
+
+    print("\n[5b] Marks that carry none and must go")
     for ch, why in MUST_BE_STRIPPED_MARKS.items():
         out = normalize(f"با{ch}با", final_punctuation=False)
         status = "ok  " if ch not in out else "FAIL"
