@@ -114,31 +114,44 @@ def checkpoints() -> list[tuple[str, Path, float | None]]:
     return out
 
 
-TAGS = {
-    "Sounds": ["laughter", "giggle", "guffaw", "sigh", "gasp", "groan", "cry",
-               "whisper", "mumble", "cough", "sneeze", "sniff", "snore",
-               "clear_throat", "inhale", "exhale", "kiss", "shhh"],
-    "Hesitation": ["UH", "UM"],
-    "Other": ["singing", "humming", "whistle", "music"],
-    "Switch language": ["fa", "en", "ar", "tr", "fr", "de", "es", "it", "ru"],
+# Chatterbox's own README puts paralinguistic tags on the Turbo model -
+# "[cough], [laugh], [chuckle], and more" - and the multilingual model card
+# does not mention them at all. This finetune is on multilingual v3, whose
+# tokenizer has neither [laugh] nor [chuckle]: the bracketed names it does
+# carry, [laughter] and [giggle], are inherited vocabulary rather than that
+# feature. Offering them here produced a syllable where a laugh was asked for,
+# which is what a token with no trained behaviour behind it sounds like.
+#
+# What the model card does document is the language set, so that is what this
+# offers instead. The caveat is theirs: a reference clip whose language differs
+# from the tag lends its accent to the output, and dropping cfg_weight to 0
+# is their suggested remedy.
+LANGUAGES = {
+    "fa - Persian": "fa", "ar - Arabic": "ar", "en - English": "en",
+    "tr - Turkish": "tr", "he - Hebrew": "he", "hi - Hindi": "hi",
+    "fr - French": "fr", "de - German": "de", "es - Spanish": "es",
+    "it - Italian": "it", "pt - Portuguese": "pt", "ru - Russian": "ru",
+    "nl - Dutch": "nl", "pl - Polish": "pl", "sv - Swedish": "sv",
+    "no - Norwegian": "no", "da - Danish": "da", "fi - Finnish": "fi",
+    "el - Greek": "el", "ja - Japanese": "ja", "ko - Korean": "ko",
+    "zh - Chinese": "zh", "ms - Malay": "ms", "sw - Swahili": "sw",
 }
 
-TAG_NOTE = (
-    "**Measured: these do not work in this finetune.** Asked for "
-    "`[laughter]`, the model says a syllable instead.\n\n"
-    "They are real tokens - `[laughter]` is 607, not ten letters - and the "
-    "multilingual base was trained with them. The corpus here has none, across "
-    "all 95,802 clips, and comparing this checkpoint against the base shows "
-    "what that did: the tags' input vectors have not moved at all (0.0%), "
-    "since a token absent from the data receives no gradient through the "
-    "embedding lookup - so the model still *reads* a tag exactly as the base "
-    "does. Their output rows moved 20%, because the softmax over all 2,455 "
-    "tokens pushes on every row at every step. So the body and the head have "
-    "spent 13,000 steps becoming a Persian model that never sees a tag, and a "
-    "tag now arrives somewhere that no longer knows what to do with it.\n\n"
-    "Left here because they are part of chatterbox and worth hearing for "
-    "yourself. Making them work needs tagged data in training, or a gradient "
-    "mask holding those rows still."
+FEATURE_NOTE = (
+    "**What this model actually has.** Multilingual v3, 23 languages, "
+    "zero-shot cloning from a reference clip, and two documented dials: "
+    "`exaggeration` (0.5 neutral, 0.7+ more expressive) and `cfg_weight` "
+    "(0.5 default, ~0.3 for a fast-speaking reference). Everything else on "
+    "this page - temperature, min_p, top_p, repetition penalty - is a sampling "
+    "control, not a documented feature.\n\n"
+    "**What it does not have: paralinguistic tags.** Chatterbox puts "
+    "`[cough]`, `[laugh]`, `[chuckle]` on the *Turbo* model; the multilingual "
+    "model card does not mention them, and this tokenizer contains neither "
+    "`[laugh]` nor `[chuckle]`. Asking for one gets a syllable. That is not "
+    "something training here can fix - it is a different model.\n\n"
+    "**One caveat from the model card:** a reference clip in a different "
+    "language from the tag lends the output its accent. Their remedy is "
+    "cfg_weight 0."
 )
 
 
@@ -220,11 +233,13 @@ class Voice:
         return (f"{Path(checkpoint).name} loaded in {time.time() - started:.0f}s "
                 f"on {self.device.type}")
 
-    def say(self, text, reference, draws, seed, temperature, cfg_weight,
-            exaggeration, repetition_penalty, min_p, top_p, long_form,
-            chunk_chars, gap_seconds):
+    def say(self, text, reference, language, draws, seed, temperature,
+            cfg_weight, exaggeration, repetition_penalty, min_p, top_p,
+            long_form, chunk_chars, gap_seconds):
         """Returns (list of (path, label), normalised text, a report)."""
-        spoken = normalize(text)
+        # Only Persian goes through the Persian normaliser; another language's
+        # text would be mangled by rules written for this script.
+        spoken = normalize(text) if language == "fa" else text
         if not spoken.strip():
             return [], "", "nothing to say"
 
@@ -249,10 +264,10 @@ class Voice:
                         text, audio_prompt_path=prompt,
                         max_chunk_chars=int(chunk_chars),
                         gap_seconds=float(gap_seconds),
-                        language_id=self.config.language_id, **settings)
+                        language_id=language, **settings)
                 else:
                     wav = self.engine.generate(
-                        text, language_id=self.config.language_id,
+                        text, language_id=language,
                         audio_prompt_path=prompt, **settings)
             took = time.time() - started
 
@@ -332,17 +347,15 @@ def build(voice: Voice, device_note: str):
                 )
                 speak = gr.Button("Speak", variant="primary")
 
-                with gr.Accordion("Tags — untested in Persian, see note",
+                language = gr.Dropdown(
+                    list(LANGUAGES.keys()), value="fa - Persian",
+                    label="Language — the finetune is Persian; the other 23 "
+                          "come from the multilingual base",
+                )
+
+                with gr.Accordion("What this model can and cannot do",
                                   open=False):
-                    gr.Markdown(TAG_NOTE)
-                    tag_buttons = []
-                    for group, names in TAGS.items():
-                        gr.Markdown(f"**{group}**")
-                        for row_start in range(0, len(names), 6):
-                            with gr.Row():
-                                for name in names[row_start:row_start + 6]:
-                                    button = gr.Button(f"[{name}]", size="sm")
-                                    tag_buttons.append((button, f"[{name}]"))
+                    gr.Markdown(FEATURE_NOTE)
 
             with gr.Column(scale=2):
                 gr.Markdown("**Generation**")
@@ -379,16 +392,22 @@ def build(voice: Voice, device_note: str):
         def on_checkpoint(path):
             return voice.load(path)
 
-        def on_speak(text, stock_pick, recorded, *rest):
+        def on_speak(text, stock_pick, recorded, language_label, *rest):
             # A recording wins when there is one; otherwise the file on disk.
             # Saying which was used matters - a microphone that silently
             # captured nothing is otherwise indistinguishable from one that
             # worked, and the audio just sounds like the default voice.
             chosen = recorded or (stock_pick if stock_pick and
                                   not stock_pick.startswith("(") else None)
-            clips, normalised, note = voice.say(text, chosen, *rest)
+            code = LANGUAGES.get(language_label, "fa")
+            clips, normalised, note = voice.say(text, chosen, code, *rest)
             source = ("your recording" if recorded else
                       Path(chosen).name if chosen else "the default reference")
+            if code != "fa":
+                note = (f"language {code}: the Persian normaliser is skipped, "
+                        "and the reference voice is Persian - the model card "
+                        "warns that lends its accent. cfg_weight 0 is their "
+                        f"remedy.\n{note}")
             note = f"reference voice: {source}\n\n{note}"
             updates = []
             for i, slot in enumerate(audio_slots):
@@ -399,20 +418,12 @@ def build(voice: Voice, device_note: str):
                     updates.append(gr.update(visible=False))
             return [*updates, normalised, note, ""]
 
-        def append_tag(tag, current):
-            spaced = (current or "").rstrip()
-            return (spaced + " " + tag + " ") if spaced else (tag + " ")
-
-        for button, tag in tag_buttons:
-            button.click(lambda current, t=tag: append_tag(t, current),
-                         [text], [text])
-
         checkpoint.change(on_checkpoint, [checkpoint], [status])
         speak.click(
             on_speak,
-            [text, stock_choice, reference, draws, seed, temperature, cfg_weight,
-             exaggeration, repetition_penalty, min_p, top_p, long_form,
-             chunk_chars, gap_seconds],
+            [text, stock_choice, reference, language, draws, seed, temperature,
+             cfg_weight, exaggeration, repetition_penalty, min_p, top_p,
+             long_form, chunk_chars, gap_seconds],
             [*audio_slots, spoken, report, status],
         )
 
