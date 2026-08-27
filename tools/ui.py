@@ -124,10 +124,21 @@ TAGS = {
 }
 
 TAG_NOTE = (
-    "These are real tokens - `[laughter]` is token 607, not ten letters - and "
-    "the multilingual base was trained with them. This Persian finetune was "
-    "not: all 95,802 clips in its corpus contain zero tags. So they may carry "
-    "over from the base or may not, and the only way to find out is to try one."
+    "**Measured: these do not work in this finetune.** Asked for "
+    "`[laughter]`, the model says a syllable instead.\n\n"
+    "They are real tokens - `[laughter]` is 607, not ten letters - and the "
+    "multilingual base was trained with them. The corpus here has none, across "
+    "all 95,802 clips, and comparing this checkpoint against the base shows "
+    "what that did: the tags' input vectors have not moved at all (0.0%), "
+    "since a token absent from the data receives no gradient through the "
+    "embedding lookup - so the model still *reads* a tag exactly as the base "
+    "does. Their output rows moved 20%, because the softmax over all 2,455 "
+    "tokens pushes on every row at every step. So the body and the head have "
+    "spent 13,000 steps becoming a Persian model that never sees a tag, and a "
+    "tag now arrives somewhere that no longer knows what to do with it.\n\n"
+    "Left here because they are part of chatterbox and worth hearing for "
+    "yourself. Making them work needs tagged data in training, or a gradient "
+    "mask holding those rows still."
 )
 
 
